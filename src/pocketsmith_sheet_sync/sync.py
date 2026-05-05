@@ -35,6 +35,7 @@ GERMAN_MONTHS = [
 
 KONTEN_TAB = "Konten"
 UEBERSICHT_TAB = "Übersicht"
+ANLEITUNG_TAB = "Anleitung"
 
 KONTEN_HEADERS = [
     "Kontoname", "Aktiv", "Institut", "Währung",
@@ -108,7 +109,7 @@ def sync_year(
     ensure_all_tabs(gs, spreadsheet_id, year)
 
     log.info("writing Konten tab")
-    write_konten_tab(gs, spreadsheet_id, accounts)
+    write_konten_tab(gs, spreadsheet_id, accounts, stats_by_account)
 
     log.info("writing Übersicht tab")
     write_uebersicht_tab(gs, spreadsheet_id, year, stats_by_account)
@@ -128,6 +129,9 @@ def sync_year(
             active_account_names=active_account_names,
         )
 
+    log.info("writing Anleitung tab")
+    write_anleitung_tab(gs, spreadsheet_id, year)
+
     log.info("cleaning up default empty tab if present")
     gs.delete_default_blank_tab(spreadsheet_id)
 
@@ -137,6 +141,7 @@ def ensure_all_tabs(gs: SheetsClient, spreadsheet_id: str, year: int) -> None:
     gs.ensure_tab(spreadsheet_id, KONTEN_TAB, index=1, rows=300, cols=15)
     for m in range(1, 13):
         gs.ensure_tab(spreadsheet_id, monat_tab_name(year, m), index=1 + m, rows=200, cols=15)
+    gs.ensure_tab(spreadsheet_id, ANLEITUNG_TAB, index=14, rows=80, cols=4)
 
 
 # ---------- Konten tab ----------
@@ -177,8 +182,14 @@ def read_active_account_names(gs: SheetsClient, spreadsheet_id: str) -> set[str]
     return active
 
 
-def write_konten_tab(gs: SheetsClient, spreadsheet_id: str, accounts: list[Account]) -> None:
+def write_konten_tab(
+    gs: SheetsClient,
+    spreadsheet_id: str,
+    accounts: list[Account],
+    stats_by_account: dict[int, AccountYearStats],
+) -> None:
     existing = read_konten_tab(gs, spreadsheet_id)
+    is_first_run = not existing  # Konten-Tab war leer → Smart-Default
 
     accounts_sorted = sorted(accounts, key=lambda a: a.name.lower())
 
@@ -189,8 +200,16 @@ def write_konten_tab(gs: SheetsClient, spreadsheet_id: str, accounts: list[Accou
         aktiv_value: bool
         if isinstance(aktiv_prev, bool):
             aktiv_value = aktiv_prev
-        else:
+        elif aktiv_prev != "":
             aktiv_value = str(aktiv_prev).strip().upper() in ("TRUE", "WAHR", "1", "YES", "JA")
+        elif is_first_run:
+            # Beim ersten Lauf: Konto wird auto-aktiviert, wenn es im Jahr
+            # mindestens eine Transaktion hatte. Spart manuelles Anhaken bei
+            # neuen Jahres-Sheets.
+            stats = stats_by_account.get(acc.id)
+            aktiv_value = bool(stats and stats.total_count_effective > 0)
+        else:
+            aktiv_value = False
         rows.append([
             acc.name,
             aktiv_value,
@@ -635,5 +654,126 @@ def apply_monat_formatting(
             start_col=col, end_col=col + 1,
             description=f"Auto-Spalte {MONAT_HEADERS[col]} (vom Script verwaltet)",
         ))
+
+    gs.batch_update(spreadsheet_id, requests)
+
+
+# ---------- Anleitung tab ----------
+
+ANLEITUNG_INHALT: list[list[str]] = [
+    [f"Anleitung – Master Sheet"],
+    [],
+    ["Diese Tabelle wird täglich um 05:00 Uhr automatisch aus PocketSmith aktualisiert."],
+    ["Du musst nichts manuell synchronisieren."],
+    [],
+    ["────────────────────────────────────────────────────────────────"],
+    ["Neues Jahr hinzufügen (z. B. 2025 oder 2024)"],
+    ["────────────────────────────────────────────────────────────────"],
+    [],
+    ["Schritt 1 – Neue Sheet in Google Drive anlegen"],
+    ["  • In Drive: leere Google Sheet erstellen, sinnvoll benennen (z. B. \"Master 2025\")"],
+    ["  • Sheet-ID notieren (steht in der URL: docs.google.com/spreadsheets/d/SHEET-ID/edit)"],
+    ["  • Sheet teilen (oben rechts \"Freigeben\")"],
+    ["  • Service-Account-Email als Editor hinzufügen:"],
+    ["    pocketsmith-sync@master-haven-494414-g0.iam.gserviceaccount.com"],
+    [],
+    ["Schritt 2 – Railway konfigurieren"],
+    ["  • railway.app öffnen → Projekt \"pocketsmith-sheet-sync\" → Variables"],
+    ["  • Neue Variable hinzufügen:"],
+    ["    Name:  MASTER_SHEET_<JAHR>     (z. B. MASTER_SHEET_2025)"],
+    ["    Value: <Sheet-ID aus Schritt 1>"],
+    ["  • Existierende Variable SYNC_YEARS erweitern:"],
+    ["    SYNC_YEARS=2026,2025          (komma-getrennt, ohne Leerzeichen)"],
+    [],
+    ["Schritt 3 – Sync auslösen"],
+    ["  • Railway-Projekt → Deployments → \"Redeploy\" beim letzten Deployment"],
+    ["  • Oder einfach bis 05:00 Uhr nächster Tag warten"],
+    ["  • Nach ~2 Min ist die neue Sheet komplett befüllt:"],
+    ["    Übersicht, Konten, Januar–Dezember, Anleitung"],
+    [],
+    ["Schritt 4 – Aktiv-Häkchen prüfen (optional)"],
+    ["  • Konten-Tab in der neuen Sheet öffnen"],
+    ["  • Das Skript hat die Aktiv-Häkchen automatisch für Konten gesetzt,"],
+    ["    die im Jahr mindestens 1 Transaktion hatten"],
+    ["  • Bei Bedarf einzelne Häkchen entfernen oder hinzufügen"],
+    [],
+    ["────────────────────────────────────────────────────────────────"],
+    ["Was du in der Sheet selbst machen darfst"],
+    ["────────────────────────────────────────────────────────────────"],
+    [],
+    ["  ✓ Manuelle Eingaben in gelben Feldern (Soll-Anzahl, Soll-Saldo)"],
+    ["  ✓ Aktiv-Häkchen in der Konten-Tab setzen/entfernen"],
+    ["  ✓ Gebucht-Häkchen in den Monats-Tabs"],
+    ["  ✓ Eigene Einträge in der Notizen-Spalte (wird nie überschrieben)"],
+    ["  ✓ Eigene Tabs hinzufügen (werden vom Skript ignoriert)"],
+    ["  ✓ Layout, Farben, Spaltenbreiten ändern"],
+    [],
+    ["  ✗ Spalten umsortieren oder umbenennen (bricht Skript)"],
+    ["  ✗ Tabs umbenennen (Skript findet sie dann nicht mehr)"],
+    [],
+    ["────────────────────────────────────────────────────────────────"],
+    ["Bei Fragen oder Problemen"],
+    ["────────────────────────────────────────────────────────────────"],
+    [],
+    ["  • Logs: railway.app → Projekt → Deployments → letzter Eintrag → Logs"],
+    ["  • Code: github.com/Maccu27/PocketSmith_Master-Sheet_Google"],
+    ["  • Service-Account: pocketsmith-sync@master-haven-494414-g0.iam.gserviceaccount.com"],
+]
+
+
+def write_anleitung_tab(gs: SheetsClient, spreadsheet_id: str, year: int) -> None:
+    rows = [list(r) for r in ANLEITUNG_INHALT]
+    gs.clear_range(spreadsheet_id, f"{ANLEITUNG_TAB}!A1:Z200")
+    gs.write_values(spreadsheet_id, f"{ANLEITUNG_TAB}!A1", rows)
+
+    sheet_id = gs.list_tabs(spreadsheet_id)[ANLEITUNG_TAB]
+    gs.clear_protections_and_conditional_formats(spreadsheet_id, sheet_id)
+    apply_anleitung_formatting(gs, spreadsheet_id, sheet_id, total_rows=len(rows))
+
+
+def apply_anleitung_formatting(
+    gs: SheetsClient, spreadsheet_id: str, sheet_id: int, *, total_rows: int
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    # Titel-Zeile (row 0): wie Header-Style, aber etwas größer
+    requests.append(repeat_cell_request(
+        sheet_id, start_row=0, end_row=1, start_col=0, end_col=4,
+        cell_format_data={
+            "backgroundColor": COLOR_HEADER_BG,
+            "horizontalAlignment": "LEFT",
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+            "textFormat": {
+                "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                "fontSize": 12,
+                "bold": True,
+            },
+            "padding": {"top": 6, "bottom": 6, "left": 8, "right": 6},
+        },
+    ))
+
+    # Sektionen-Header (Zeilen 6, 36, 49 in 1-basiert → 0-basiert 5, 35, 48)
+    # Wir suchen nach "─" als Marker
+    section_header_rows: list[int] = []
+    for i, row in enumerate(ANLEITUNG_INHALT):
+        if row and isinstance(row[0], str) and "─" in row[0]:
+            # die Zeile danach ist der Sektion-Titel
+            section_header_rows.append(i + 1)
+
+    for r in section_header_rows:
+        requests.append(repeat_cell_request(
+            sheet_id, start_row=r, end_row=r + 1, start_col=0, end_col=4,
+            cell_format_data=cell_format(bold=True, background=COLOR_AUTO_BG),
+        ))
+
+    # Komplette Spalte A breit, damit alles lesbar bleibt
+    requests.append(set_column_width_request(sheet_id, 0, 1, 800))
+
+    # Schutz: alles
+    requests.append(add_protected_range_request(
+        sheet_id, start_row=0, end_row=total_rows + 5, start_col=0, end_col=4,
+        description="Anleitung (vom Script verwaltet)",
+    ))
 
     gs.batch_update(spreadsheet_id, requests)
