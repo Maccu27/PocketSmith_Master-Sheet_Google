@@ -97,35 +97,36 @@ class PDFTracker:
         self._finanzen_folder_id = finanzen_folder_id
         self._sheet_id = explicit_sheet_id
         self._processed_ids: set[str] | None = None
+        self._tabs_initialized = False
 
     @property
     def sheet_id(self) -> str:
-        if self._sheet_id:
-            return self._sheet_id
-        # Suche Sheet im Finanzen-Ordner
-        existing = self._drive.find_in_folder_by_name(
-            self._finanzen_folder_id, TRACKING_SHEET_NAME, mime_type=SPREADSHEET_MIME,
-        )
-        if existing:
-            self._sheet_id = existing
-            return existing
-        # Erstellen
-        log.info("Tracking-Sheet existiert nicht, lege es an in Finanzen-Ordner")
-        new_id = self._drive.create_spreadsheet_in_folder(
-            self._finanzen_folder_id, TRACKING_SHEET_NAME,
-        )
-        self._sheet_id = new_id
-        self._initialize_tabs()
-        return new_id
+        if not self._sheet_id:
+            existing = self._drive.find_in_folder_by_name(
+                self._finanzen_folder_id, TRACKING_SHEET_NAME, mime_type=SPREADSHEET_MIME,
+            )
+            if existing:
+                self._sheet_id = existing
+            else:
+                log.info("Tracking-Sheet existiert nicht, lege es an in Finanzen-Ordner")
+                self._sheet_id = self._drive.create_spreadsheet_in_folder(
+                    self._finanzen_folder_id, TRACKING_SHEET_NAME,
+                )
+        # Tabs/Header sind idempotent — auch bei manuell angelegtem Sheet
+        # stellen wir sicher, dass die richtigen Tabs + Header da sind.
+        if not self._tabs_initialized:
+            self._initialize_tabs()
+            self._tabs_initialized = True
+        return self._sheet_id
 
     def _initialize_tabs(self) -> None:
         sheet_id = self._sheet_id
         assert sheet_id
         self._sheets.ensure_tab(sheet_id, PARSED_TAB, index=0, rows=2000, cols=20)
         self._sheets.ensure_tab(sheet_id, ERROR_TAB, index=1, rows=500, cols=10)
-        # Headers schreiben
-        self._sheets.write_values(sheet_id, f"{PARSED_TAB}!A1", [PARSED_HEADERS])
-        self._sheets.write_values(sheet_id, f"{ERROR_TAB}!A1", [ERROR_HEADERS])
+        # Headers schreiben — Tab-Namen mit Leerzeichen brauchen Quotes
+        self._sheets.write_values(sheet_id, f"'{PARSED_TAB}'!A1", [PARSED_HEADERS])
+        self._sheets.write_values(sheet_id, f"'{ERROR_TAB}'!A1", [ERROR_HEADERS])
         # Default-Tab löschen
         self._sheets.delete_default_blank_tab(sheet_id)
 
@@ -135,7 +136,7 @@ class PDFTracker:
         sheet_id = self.sheet_id
         try:
             result = self._sheets._sheets.spreadsheets().values().get(  # noqa: SLF001
-                spreadsheetId=sheet_id, range=f"{PARSED_TAB}!A2:A",
+                spreadsheetId=sheet_id, range=f"'{PARSED_TAB}'!A2:A",
             ).execute()
             rows = result.get("values") or []
             self._processed_ids = {row[0] for row in rows if row and row[0]}
@@ -147,9 +148,11 @@ class PDFTracker:
     def append_parsed(self, record: ParsedRecord) -> None:
         sheet_id = self.sheet_id
         body = {"values": [record.as_row()]}
+        # Tab-Name mit Leerzeichen muss in single quotes; offene Range-Syntax
+        # 'A:Z' wird beim append teilweise abgelehnt, daher A1:P explicit.
         self._sheets._sheets.spreadsheets().values().append(  # noqa: SLF001
             spreadsheetId=sheet_id,
-            range=f"{PARSED_TAB}!A:Z",
+            range=f"'{PARSED_TAB}'!A1:P",
             valueInputOption="USER_ENTERED",
             body=body,
         ).execute()
@@ -161,7 +164,7 @@ class PDFTracker:
         body = {"values": [[file_id, path, datetime.utcnow().isoformat(), error]]}
         self._sheets._sheets.spreadsheets().values().append(  # noqa: SLF001
             spreadsheetId=sheet_id,
-            range=f"{ERROR_TAB}!A:D",
+            range=f"'{ERROR_TAB}'!A1:D",
             valueInputOption="USER_ENTERED",
             body=body,
         ).execute()
@@ -171,7 +174,7 @@ class PDFTracker:
         sheet_id = self.sheet_id
         try:
             result = self._sheets._sheets.spreadsheets().values().get(  # noqa: SLF001
-                spreadsheetId=sheet_id, range=f"{PARSED_TAB}!A2:P",
+                spreadsheetId=sheet_id, range=f"'{PARSED_TAB}'!A2:P",
             ).execute()
         except Exception:
             return []
