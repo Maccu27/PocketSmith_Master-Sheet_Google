@@ -12,8 +12,12 @@ dependencies = [
     "pydantic-settings>=2.4.0",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.2.0"]
+
 [project.scripts]
 pocketsmith-sync = "pocketsmith_sheet_sync.main:cli"
+pocketsmith-sync-mcp = "pocketsmith_sheet_sync.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]
