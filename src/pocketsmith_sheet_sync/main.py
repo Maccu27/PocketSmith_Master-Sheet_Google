@@ -75,6 +75,25 @@ def _run_backfill(year: int, verbose: bool) -> int:
     return 0
 
 
+def _run_daily(verbose: bool) -> int:
+    """Combine: PocketSmith → Sheets, then Drive-PDFs → Soll-Werte."""
+    log.info("====== daily run: phase 1 = PocketSmith sync ======")
+    sync_rc = _run_sync(None, verbose)
+    if sync_rc != 0:
+        log.error("PocketSmith sync exited with rc=%d, fortsetzen mit parse-pdfs", sync_rc)
+
+    log.info("====== daily run: phase 2 = PDF parser ======")
+    try:
+        _run_parse_pdfs(verbose)
+    except Exception as exc:
+        # parse-pdfs nicht kritisch — falls Anthropic-Key oder Drive-Setup fehlt,
+        # ist sync trotzdem schon erledigt.
+        log.error("parse-pdfs schlug fehl: %s", exc, exc_info=True)
+        return 0  # sync ist durch, das reicht
+    log.info("====== daily run done ======")
+    return 0
+
+
 def cli() -> int:
     parser = argparse.ArgumentParser(prog="pocketsmith-sync")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -90,6 +109,9 @@ def cli() -> int:
     p_bf.add_argument("--year", type=int, required=True)
     p_bf.add_argument("-v", "--verbose", action="store_true")
 
+    p_daily = sub.add_parser("daily", help="sync + parse-pdfs in einem Lauf")
+    p_daily.add_argument("-v", "--verbose", action="store_true")
+
     args = parser.parse_args()
     setup_logging(getattr(args, "verbose", False))
 
@@ -101,6 +123,8 @@ def cli() -> int:
         return _run_parse_pdfs(args.verbose)
     if args.command == "backfill":
         return _run_backfill(args.year, args.verbose)
+    if args.command == "daily":
+        return _run_daily(args.verbose)
     return 1
 
 
