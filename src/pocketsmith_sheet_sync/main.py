@@ -22,21 +22,9 @@ def setup_logging(verbose: bool) -> None:
     )
 
 
-def cli() -> int:
-    parser = argparse.ArgumentParser(prog="pocketsmith-sync")
-    parser.add_argument("command", choices=["sync"], help="action to run")
-    parser.add_argument(
-        "--years",
-        help="comma-separated list of years to sync (overrides SYNC_YEARS env)",
-    )
-    parser.add_argument("-v", "--verbose", action="store_true")
-    args = parser.parse_args()
-    setup_logging(args.verbose)
-
+def _run_sync(years: list[int] | None, verbose: bool) -> int:
     settings = load_settings()
-    if args.years:
-        years = [int(y.strip()) for y in args.years.split(",") if y.strip()]
-    else:
+    if years is None:
         years = settings.years
 
     sheets_per_year = settings.sheets_per_year
@@ -64,8 +52,56 @@ def cli() -> int:
                 verified_label=settings.verified_label,
             )
 
-    log.info("done")
+    log.info("sync done")
     return 0
+
+
+def _run_parse_pdfs(verbose: bool) -> int:
+    from .pdf_sync import parse_all_new_pdfs
+    settings = load_settings()
+    today = date.today()
+    cred_info = settings.google_credentials_info()
+    counters = parse_all_new_pdfs(settings, cred_info=cred_info, today=today)
+    log.info("parse-pdfs done: %s", counters)
+    return 0
+
+
+def _run_backfill(year: int, verbose: bool) -> int:
+    from .pdf_sync import backfill_master_sheet_from_tracker
+    settings = load_settings()
+    cred_info = settings.google_credentials_info()
+    written = backfill_master_sheet_from_tracker(settings, cred_info=cred_info, year=year)
+    log.info("backfill %d done: %d Zeilen geschrieben", year, written)
+    return 0
+
+
+def cli() -> int:
+    parser = argparse.ArgumentParser(prog="pocketsmith-sync")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_sync = sub.add_parser("sync", help="PocketSmith → Google Sheets")
+    p_sync.add_argument("--years", help="comma-separated list of years")
+    p_sync.add_argument("-v", "--verbose", action="store_true")
+
+    p_pdf = sub.add_parser("parse-pdfs", help="Drive-PDFs → Soll-Werte in Sheets")
+    p_pdf.add_argument("-v", "--verbose", action="store_true")
+
+    p_bf = sub.add_parser("backfill", help="Tracker-Daten in eine Master-Sheet schreiben")
+    p_bf.add_argument("--year", type=int, required=True)
+    p_bf.add_argument("-v", "--verbose", action="store_true")
+
+    args = parser.parse_args()
+    setup_logging(getattr(args, "verbose", False))
+
+    if args.command == "sync":
+        years_arg = getattr(args, "years", None)
+        years = [int(y.strip()) for y in years_arg.split(",")] if years_arg else None
+        return _run_sync(years, args.verbose)
+    if args.command == "parse-pdfs":
+        return _run_parse_pdfs(args.verbose)
+    if args.command == "backfill":
+        return _run_backfill(args.year, args.verbose)
+    return 1
 
 
 if __name__ == "__main__":

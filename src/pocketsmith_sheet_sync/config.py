@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     verified_label: str = Field(default="Verifiziert")
     sync_years: str = Field(default="2026")
 
+    # PDF-Parser
+    anthropic_api_key: str | None = Field(default=None)
+    anthropic_model: str = Field(default="claude-sonnet-4-6")
+    pdf_tracking_sheet_id: str | None = Field(default=None)
+    pdf_kontoauszug_folder_marker: str = Field(default="Kontoauszüge")
+
     @field_validator("sync_years")
     @classmethod
     def _validate_years(cls, v: str) -> str:

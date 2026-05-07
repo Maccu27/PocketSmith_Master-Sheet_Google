@@ -73,6 +73,36 @@ def list_years() -> dict[str, Any]:
 
 
 @mcp.tool()
+def parse_pdfs() -> dict[str, Any]:
+    """
+    Triggert den PDF-Parser: scannt Drive-Ordner Finanzen/.../Kontoauszüge,
+    schickt neue PDFs an Claude, schreibt Soll-Werte in Master-Sheets.
+
+    Voraussetzungen:
+      - ANTHROPIC_API_KEY in .env / Railway
+      - DRIVE_FINANZEN_FOLDER_ID auf Wurzel-Drive-Ordner
+
+    Bei vielen unverarbeiteten PDFs kann es lange dauern (~5–15 s pro PDF).
+    """
+    from .pdf_sync import parse_all_new_pdfs
+    settings = load_settings()
+    cred_info = settings.google_credentials_info()
+    return parse_all_new_pdfs(settings, cred_info=cred_info, today=date.today())
+
+
+@mcp.tool()
+def backfill_year(year: int) -> dict[str, Any]:
+    """Schreibt für ein bestimmtes Jahr alle bereits getrackten Soll-Werte in
+    die zugehörige Master-Sheet (z. B. nach dem Anlegen einer neuen Jahres-Sheet).
+    """
+    from .pdf_sync import backfill_master_sheet_from_tracker
+    settings = load_settings()
+    cred_info = settings.google_credentials_info()
+    written = backfill_master_sheet_from_tracker(settings, cred_info=cred_info, year=year)
+    return {"year": year, "rows_written": written}
+
+
+@mcp.tool()
 def health_check() -> dict[str, Any]:
     """
     Prüft, ob das Setup funktional ist:
