@@ -49,7 +49,13 @@ class Settings(BaseSettings):
         if self.google_service_account_json:
             return json.loads(self.google_service_account_json)
         if self.google_service_account_file:
-            return json.loads(Path(self.google_service_account_file).read_text())
+            value = self.google_service_account_file.strip()
+            # Toleriere häufigen Fehler: JSON-Inhalt landet versehentlich in der
+            # _FILE-Variable. Wenn der Wert mit "{" anfängt, ist es ganz sicher
+            # JSON-Content und kein Pfad.
+            if value.startswith("{"):
+                return json.loads(value)
+            return json.loads(Path(value).read_text())
         raise RuntimeError(
             "No Google service account configured. Set GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON."
         )
