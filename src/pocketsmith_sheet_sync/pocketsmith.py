@@ -16,20 +16,29 @@ PER_PAGE = 100
 
 @dataclass(frozen=True)
 class Account:
-    id: int
-    name: str
+    """Eine Zeile in der Konten-Tab = ein PocketSmith **transaction_account**.
+
+    Wir verwenden die fein-granulare Ebene (93 statt 53), damit archivierte
+    Sammel-Accounts (z. B. "Archivierte Konten (Investments-EUR)") in ihre
+    einzelnen Sub-Konten aufgelöst werden — pro IBAN/Konto eine Zeile.
+    """
+
+    id: int                            # transaction_account ID
+    parent_account_id: int             # ID des übergeordneten logischen Account
+    name: str                          # transaction_account-Name (mit IBAN, falls vorhanden)
     institution: str | None
     current_balance: float
     currency: str
     is_net_worth: bool
-    transaction_account_ids: list[int]
+    starting_balance: float | None
+    starting_balance_date: date | None
 
 
 @dataclass(frozen=True)
 class Transaction:
     id: int
-    account_id: int
-    transaction_account_id: int
+    account_id: int                     # parent account ID
+    transaction_account_id: int         # = Account.id in unserem neuen Modell
     date: date
     amount: float
     labels: list[str]
@@ -75,27 +84,30 @@ class PocketSmithClient:
         return self._user_id
 
     def list_accounts(self) -> list[Account]:
+        """Liefert ALLE transaction_accounts (93 Stück), nicht die logischen accounts.
+
+        Damit erscheint jedes archivierte Sub-Konto einzeln in der Sheet — z. B.
+        die 26 Konten unter "Archivierte Konten (Investments-EUR)".
+        """
         uid = self.user_id()
-        data = self._request("GET", f"/users/{uid}/accounts").json()
+        data = self._request("GET", f"/users/{uid}/transaction_accounts").json()
         accounts: list[Account] = []
         for raw in data:
-            tx_account_ids = [int(ta["id"]) for ta in raw.get("transaction_accounts") or []]
-            primary_currency = raw.get("currency_code") or "EUR"
-            institution_name = None
-            for ta in raw.get("transaction_accounts") or []:
-                inst = ta.get("institution") or {}
-                if inst.get("title"):
-                    institution_name = inst["title"]
-                    break
+            inst = raw.get("institution") or {}
+            currency = (raw.get("currency_code") or "EUR").upper()
+            sb_raw = raw.get("starting_balance")
+            sb_date_raw = raw.get("starting_balance_date")
             accounts.append(
                 Account(
                     id=int(raw["id"]),
-                    name=str(raw.get("title") or "<unbenannt>"),
-                    institution=institution_name,
+                    parent_account_id=int(raw.get("account_id") or 0),
+                    name=str(raw.get("name") or "<unbenannt>"),
+                    institution=inst.get("title"),
                     current_balance=float(raw.get("current_balance") or 0.0),
-                    currency=primary_currency.upper(),
+                    currency=currency,
                     is_net_worth=bool(raw.get("is_net_worth", True)),
-                    transaction_account_ids=tx_account_ids,
+                    starting_balance=float(sb_raw) if sb_raw is not None else None,
+                    starting_balance_date=date.fromisoformat(sb_date_raw) if sb_date_raw else None,
                 )
             )
         return accounts
@@ -107,21 +119,23 @@ class PocketSmithClient:
         start_date: date,
         end_date: date,
     ) -> Iterator[Transaction]:
+        """Lädt Transaktionen für ein transaction_account (= Account.id in unserem Modell)."""
         params: dict[str, Any] = {
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "per_page": PER_PAGE,
             "page": 1,
         }
-        path = f"/accounts/{account_id}/transactions"
+        path = f"/transaction_accounts/{account_id}/transactions"
         while True:
             response = self._request("GET", path, params=params)
             page = response.json() or []
             for raw in page:
+                ta_obj = raw.get("transaction_account") or {}
                 yield Transaction(
                     id=int(raw["id"]),
-                    account_id=account_id,
-                    transaction_account_id=int(raw["transaction_account"]["id"]),
+                    account_id=int(ta_obj.get("account_id") or 0),
+                    transaction_account_id=int(ta_obj.get("id") or account_id),
                     date=date.fromisoformat(raw["date"]),
                     amount=float(raw.get("amount") or 0.0),
                     labels=list(raw.get("labels") or []),
