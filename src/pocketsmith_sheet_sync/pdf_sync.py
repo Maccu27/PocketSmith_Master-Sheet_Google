@@ -8,6 +8,7 @@ das Jahr konfiguriert ist), trackt alles in einem separaten Tracking-Sheet.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime
 from typing import Any
 
@@ -98,16 +99,23 @@ def parse_all_new_pdfs(
     sheets_per_year = settings.sheets_per_year
     counters = {"total": len(pdfs), "new": len(new_pdfs), "errors": 0, "written_to_sheet": 0}
 
-    for pdf in new_pdfs:
-        log.info("Verarbeite: %s (%.0f KB)", pdf.path, pdf.size / 1024)
+    for i, pdf in enumerate(new_pdfs):
+        log.info("Verarbeite: %s (%.0f KB) [%d/%d]", pdf.path, pdf.size / 1024, i + 1, len(new_pdfs))
         try:
             pdf_bytes = drive.download_bytes(pdf.id)
             result = extractor.extract(pdf_bytes, accounts=accounts, pdf_filename=pdf.name)
         except Exception as exc:
-            log.error("Fehler bei %s: %s", pdf.path, exc, exc_info=True)
+            log.error("Fehler bei %s: %s", pdf.path, exc, exc_info=False)
             tracker.append_error(pdf.id, pdf.path, str(exc))
             counters["errors"] += 1
+            # Bei Rate Limit kurz warten, sonst wird der nächste Call auch failen
+            if "rate_limit" in str(exc).lower() or "429" in str(exc):
+                log.info("  Rate-Limit getroffen — 30s pausieren")
+                time.sleep(30)
             continue
+        # Throttle: 2s zwischen Calls hält uns sicher unter 30k tokens/min
+        # (mit Prompt Caching ist der Verbrauch eh viel niedriger).
+        time.sleep(2)
 
         try:
             year, month = parse_year_month_from_dates(

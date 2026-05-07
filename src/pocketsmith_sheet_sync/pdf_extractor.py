@@ -119,7 +119,10 @@ def _account_summary(account: Account) -> dict[str, Any]:
 
 class PDFExtractor:
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL):
-        self._client = anthropic.Anthropic(api_key=api_key)
+        # 8 Retries mit exponential backoff (Default ist 2) — bei Rate-Limit
+        # gibt Anthropic in den Headers retry_after zurück, der SDK-Client
+        # respektiert das automatisch.
+        self._client = anthropic.Anthropic(api_key=api_key, max_retries=8)
         self._model = model
 
     def extract(
@@ -133,7 +136,10 @@ class PDFExtractor:
         account_list = [_account_summary(a) for a in accounts]
         b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
 
-        system_prompt = (
+        # System-Prompt enthält die ~93 Konten und ist für jeden Sync-Lauf
+        # identisch → mit cache_control wird er nach dem 1. Call zu 0,1×
+        # Token-Kosten und zählt entsprechend gegen das Rate Limit.
+        system_prompt_text = (
             "Du bist ein Bank-Statement-Extractor. Lies den deutschen Bankauszug und "
             "extrahiere die geforderten Felder genau. Zähle Buchungen (Transaktionen) — "
             "sowohl Soll als auch Haben — als einzelne Positionen. Endsaldo ist der "
@@ -150,7 +156,13 @@ class PDFExtractor:
         response = self._client.messages.create(
             model=self._model,
             max_tokens=2048,
-            system=system_prompt,
+            system=[
+                {
+                    "type": "text",
+                    "text": system_prompt_text,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             tools=[EXTRACTION_TOOL],
             tool_choice={"type": "tool", "name": EXTRACTION_TOOL["name"]},
             messages=[
