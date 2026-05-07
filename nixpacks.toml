@@ -1,0 +1,12 @@
+[phases.setup]
+nixPkgs = ["python311"]
+
+[phases.install]
+cmds = [
+    "python -m venv /opt/venv",
+    "/opt/venv/bin/pip install --upgrade pip",
+    "/opt/venv/bin/pip install ."
+]
+
+[start]
+cmd = "/opt/venv/bin/python -m pocketsmith_sheet_sync.main sync"

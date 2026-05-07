@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python -m pocketsmith_sheet_sync.main sync",
+    "startCommand": "/opt/venv/bin/python -m pocketsmith_sheet_sync.main sync",
     "restartPolicyType": "NEVER",
     "cronSchedule": "0 3 * * *"
   }
