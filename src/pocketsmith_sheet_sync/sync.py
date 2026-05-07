@@ -108,8 +108,18 @@ def sync_year(
     log.info("ensuring tabs in spreadsheet")
     ensure_all_tabs(gs, spreadsheet_id, year)
 
-    log.info("writing Konten tab")
-    write_konten_tab(gs, spreadsheet_id, accounts, stats_by_account)
+    # Pro Jahres-Sheet zeigen wir nur Konten, die in dem Jahr Aktivität hatten.
+    # Damit erscheinen Konten erst ab dem Jahr, in dem die erste Transaktion lief —
+    # also z. B. DKB nicht in den 2003er Sheet, weil es erst 2021 in PocketSmith kam.
+    accounts_in_year = [
+        acc for acc in accounts
+        if stats_by_account[acc.id].total_count_effective > 0
+    ]
+    log.info(
+        "writing Konten tab (%d von %d accounts hatten Tx in %d)",
+        len(accounts_in_year), len(accounts), year,
+    )
+    write_konten_tab(gs, spreadsheet_id, accounts_in_year, stats_by_account)
 
     log.info("writing Übersicht tab")
     write_uebersicht_tab(gs, spreadsheet_id, year, stats_by_account)
