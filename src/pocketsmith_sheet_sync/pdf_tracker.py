@@ -170,13 +170,21 @@ class PDFTracker:
         ).execute()
 
     def all_parsed_records(self) -> list[ParsedRecord]:
-        """Lade alle verarbeiteten PDFs für den Backfill in Master-Sheets."""
+        """Lade alle verarbeiteten PDFs für den Backfill in Master-Sheets.
+
+        Cached pro Tracker-Instanz — wenn der gleiche Run mehrmals fragt,
+        wird nicht jedes Mal die ganze Tracker-Sheet neu gelesen (Quota!).
+        """
+        if hasattr(self, "_records_cache"):
+            return self._records_cache  # type: ignore[attr-defined]
+
         sheet_id = self.sheet_id
         try:
             result = self._sheets._sheets.spreadsheets().values().get(  # noqa: SLF001
                 spreadsheetId=sheet_id, range=f"'{PARSED_TAB}'!A2:P",
             ).execute()
         except Exception:
+            self._records_cache = []  # type: ignore[attr-defined]
             return []
         rows = result.get("values") or []
         records: list[ParsedRecord] = []
@@ -205,4 +213,5 @@ class PDFTracker:
                 ))
             except (ValueError, IndexError) as exc:
                 log.warning("Skipping malformed tracker row: %s (%s)", row, exc)
+        self._records_cache = records  # type: ignore[attr-defined]
         return records

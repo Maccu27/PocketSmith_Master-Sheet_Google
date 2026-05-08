@@ -184,24 +184,38 @@ def backfill_master_sheet_from_tracker(
     *,
     cred_info: dict[str, Any],
     year: int,
+    _shared_tracker: PDFTracker | None = None,
+    _shared_sheets: SheetsClient | None = None,
+    _row_cache: dict[tuple[str, str], dict[str, int]] | None = None,
 ) -> int:
-    """Schreibt für ein Jahr alle bereits getrackten Soll-Werte in die Master-Sheet."""
+    """Schreibt für ein Jahr alle bereits getrackten Soll-Werte in die Master-Sheet.
+
+    Wenn `_shared_tracker` und `_shared_sheets` mitgegeben werden, nutzt die
+    Funktion sie statt neue Instanzen anzulegen — wichtig für Multi-Year-Runs,
+    damit der Tracker-Read nicht 24× anfällt (Quota-Limit Sheets API).
+    """
     sheets_per_year = settings.sheets_per_year
     master_sheet_id = sheets_per_year.get(year)
     if not master_sheet_id:
         raise RuntimeError(f"Kein MASTER_SHEET_{year} konfiguriert")
 
-    drive = DriveClient(cred_info)
-    sheets = SheetsClient(cred_info)
-    tracker = PDFTracker(
-        sheets, drive,
-        finanzen_folder_id=settings.drive_finanzen_folder_id or "",
-        explicit_sheet_id=settings.pdf_tracking_sheet_id,
-    )
+    sheets = _shared_sheets or SheetsClient(cred_info)
+    if _shared_tracker is None:
+        drive = DriveClient(cred_info)
+        tracker = PDFTracker(
+            sheets, drive,
+            finanzen_folder_id=settings.drive_finanzen_folder_id or "",
+            explicit_sheet_id=settings.pdf_tracking_sheet_id,
+        )
+    else:
+        tracker = _shared_tracker
 
-    records = tracker.all_parsed_records()
+    records = tracker.all_parsed_records()  # gecacht in tracker
     relevant = [r for r in records if r.year == year and r.matched_account_name]
     log.info("Backfill für %d: %d relevante Tracker-Einträge", year, len(relevant))
+
+    if _row_cache is None:
+        _row_cache = {}
 
     written = 0
     for r in relevant:
@@ -211,12 +225,55 @@ def backfill_master_sheet_from_tracker(
                 account_name=r.matched_account_name,
                 soll_count=r.transaction_count,
                 soll_balance=r.ending_balance,
+                _row_cache=_row_cache,
             )
             if ok:
                 written += 1
         except Exception as exc:
             log.warning("Backfill skip für %s/%s: %s", r.path, r.matched_account_name, exc)
     return written
+
+
+def backfill_all_configured_years(
+    settings: Settings,
+    *,
+    cred_info: dict[str, Any],
+) -> dict[int, int]:
+    """Backfill-Lauf über alle Jahre, mit shared Tracker + Row-Cache.
+
+    Spart Sheets-API-Reads: Tracker wird 1× geladen, Konten-Tab-Reads pro
+    Master-Sheet/Tab werden gecacht.
+    """
+    sheets = SheetsClient(cred_info)
+    drive = DriveClient(cred_info)
+    tracker = PDFTracker(
+        sheets, drive,
+        finanzen_folder_id=settings.drive_finanzen_folder_id or "",
+        explicit_sheet_id=settings.pdf_tracking_sheet_id,
+    )
+    # Lade Records einmal vorab (cached für alle weiteren Aufrufe)
+    tracker.all_parsed_records()
+
+    row_cache: dict[tuple[str, str], dict[str, int]] = {}
+    results: dict[int, int] = {}
+
+    for year in sorted(settings.sheets_per_year.keys()):
+        try:
+            written = backfill_master_sheet_from_tracker(
+                settings, cred_info=cred_info, year=year,
+                _shared_tracker=tracker,
+                _shared_sheets=sheets,
+                _row_cache=row_cache,
+            )
+            results[year] = written
+            log.info("backfill %d: %d Soll-Werte geschrieben", year, written)
+        except Exception as exc:
+            log.error("backfill %d fehlgeschlagen: %s", year, exc)
+            results[year] = -1
+        # Kleine Pause gegen Sheets-API-Quota (60 Read/min Limit)
+        time.sleep(1)
+
+    return results
 
 
 def write_soll_to_master_sheet(
@@ -228,36 +285,46 @@ def write_soll_to_master_sheet(
     account_name: str,
     soll_count: int,
     soll_balance: float,
+    _row_cache: dict[tuple[str, str], dict[str, int]] | None = None,
 ) -> bool:
     """Findet die Zeile mit `account_name` im Monatstab und schreibt Soll-Werte.
 
     Returns True wenn geschrieben wurde, False wenn der Account in der Konten-Tab
     nicht aktiv ist (d. h. die Zeile fehlt in dem Monatstab).
+
+    Mit `_row_cache` wird der Konto→Zeile-Lookup pro (sheet, tab) gecacht —
+    das spart bei Multi-Backfill viele Sheets-API-Read-Calls (Quota!).
     """
     tab = monat_tab_name(year, month)
-    range_a1 = f"{tab}!A1:A300"  # Spalte A = Kontoname
-    try:
-        result = sheets._sheets.spreadsheets().values().get(  # noqa: SLF001
-            spreadsheetId=spreadsheet_id, range=range_a1,
-        ).execute()
-    except Exception as exc:
-        log.warning("Tab '%s' nicht lesbar: %s", tab, exc)
-        return False
+    cache_key = (spreadsheet_id, tab)
 
-    values = result.get("values") or []
-    target_row: int | None = None
-    for idx, row in enumerate(values):
-        if not row:
-            continue
-        if row[0] == account_name:
-            target_row = idx + 1  # 1-basiert
-            break
+    if _row_cache is not None and cache_key in _row_cache:
+        row_map = _row_cache[cache_key]
+    else:
+        range_a1 = f"{tab}!A1:A300"
+        try:
+            result = sheets._sheets.spreadsheets().values().get(  # noqa: SLF001
+                spreadsheetId=spreadsheet_id, range=range_a1,
+            ).execute()
+        except Exception as exc:
+            log.warning("Tab '%s' nicht lesbar: %s", tab, exc)
+            if _row_cache is not None:
+                _row_cache[cache_key] = {}
+            return False
+        values = result.get("values") or []
+        row_map = {
+            row[0]: idx + 1
+            for idx, row in enumerate(values)
+            if row and row[0]
+        }
+        if _row_cache is not None:
+            _row_cache[cache_key] = row_map
 
+    target_row = row_map.get(account_name)
     if target_row is None:
         return False
 
-    # Spalte C (Soll-Anzahl) + Spalte F (Soll-Saldo) einzeln updaten,
-    # damit die Formel-Spalten D, E, G dazwischen unangetastet bleiben.
+    # Spalte C (Soll-Anzahl) + Spalte F (Soll-Saldo) einzeln updaten.
     sheets.write_values(
         spreadsheet_id,
         f"{tab}!{MONAT_COL_SOLL_ANZAHL_LETTER}{target_row}",

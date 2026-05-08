@@ -89,21 +89,14 @@ def _run_daily(verbose: bool) -> int:
         log.error("parse-pdfs schlug fehl: %s", exc, exc_info=True)
 
     log.info("====== daily run: phase 3 = backfill Soll-Werte ins Master-Sheets ======")
-    # Backfill für alle konfigurierten Jahre — das ist idempotent und löst das
-    # Problem, dass Tracker-Daten aus früheren Runs in neu aktivierte Jahres-
-    # Sheets noch nicht eingetragen wurden.
+    # Backfill für alle konfigurierten Jahre — gemeinsamer Tracker + Row-Cache,
+    # damit wir nicht ins 60/min Read-Limit der Sheets-API laufen.
     try:
-        from .pdf_sync import backfill_master_sheet_from_tracker
+        from .pdf_sync import backfill_all_configured_years
         settings = load_settings()
         cred_info = settings.google_credentials_info()
-        for year in sorted(settings.sheets_per_year.keys()):
-            try:
-                written = backfill_master_sheet_from_tracker(
-                    settings, cred_info=cred_info, year=year,
-                )
-                log.info("backfill %d: %d Soll-Werte geschrieben", year, written)
-            except Exception as exc:
-                log.error("backfill %d fehlgeschlagen: %s", year, exc)
+        results = backfill_all_configured_years(settings, cred_info=cred_info)
+        log.info("backfill-summary: %s", results)
     except Exception as exc:
         log.error("backfill-phase schlug fehl: %s", exc, exc_info=True)
 
