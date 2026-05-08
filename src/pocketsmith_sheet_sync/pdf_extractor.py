@@ -24,9 +24,10 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 EXTRACTION_TOOL = {
     "name": "extract_bank_statement",
     "description": (
-        "Extract structured data from a bank statement PDF. Match the statement to "
-        "exactly one account from the provided account list using IBAN, account number, "
-        "bank name, or other identifying information. If no match is confident, set "
+        "Extract structured data from a German bank statement PDF, including the "
+        "complete list of individual transactions with date, amount and description. "
+        "Match the statement to exactly one account from the provided account list "
+        "using IBAN, account number, bank name. If no match is confident, set "
         "matched_account_id to null and explain why in notes."
     ),
     "input_schema": {
@@ -36,9 +37,10 @@ EXTRACTION_TOOL = {
             "iban_or_account_number",
             "statement_period_start",
             "statement_period_end",
-            "transaction_count",
+            "starting_balance",
             "ending_balance",
             "currency",
+            "transactions",
             "matched_account_id",
             "confidence",
             "notes",
@@ -51,21 +53,52 @@ EXTRACTION_TOOL = {
             },
             "statement_period_start": {
                 "type": "string",
-                "description": "Beginn des Auszugs-Zeitraums im Format YYYY-MM-DD.",
+                "description": "Beginn des Auszugs-Zeitraums (YYYY-MM-DD). Bei DKB typisch der 5. des Monats.",
             },
             "statement_period_end": {
                 "type": "string",
-                "description": "Ende des Auszugs-Zeitraums im Format YYYY-MM-DD.",
+                "description": "Ende des Auszugs-Zeitraums (YYYY-MM-DD). Bei DKB typisch der 4. des Folgemonats.",
             },
-            "transaction_count": {
-                "type": "integer",
-                "description": "Anzahl Buchungen (Soll- und Habenposten zusammen).",
+            "starting_balance": {
+                "type": "number",
+                "description": (
+                    "Anfangssaldo zu Beginn des Auszugs (= Endsaldo des vorherigen Auszugs). "
+                    "Negativ bei Soll. Wird für einen Konsistenz-Check zwischen aufeinanderfolgenden Auszügen genutzt."
+                ),
             },
             "ending_balance": {
                 "type": "number",
                 "description": "Endsaldo am Stichtag des Auszugs. Negativ wenn Schulden.",
             },
             "currency": {"type": "string", "description": "Währung als ISO-Code (EUR, USD, ...)."},
+            "transactions": {
+                "type": "array",
+                "description": (
+                    "Liste ALLER Buchungen im Auszug, in der Reihenfolge wie im PDF. "
+                    "Jede Soll- oder Habenposition ist EIN Eintrag. Auch Gebühren, Zinsen, Storno gehören dazu."
+                ),
+                "items": {
+                    "type": "object",
+                    "required": ["date", "amount", "description"],
+                    "properties": {
+                        "date": {
+                            "type": "string",
+                            "description": (
+                                "Buchungsdatum im Format YYYY-MM-DD. Wenn nur Wertstellung "
+                                "und Buchung getrennt sind: nimm das Buchungsdatum."
+                            ),
+                        },
+                        "amount": {
+                            "type": "number",
+                            "description": "Positiv für Habenbuchung, negativ für Sollbuchung.",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Verwendungszweck/Empfänger – kompakt, max ~100 Zeichen.",
+                        },
+                    },
+                },
+            },
             "matched_account_id": {
                 "type": ["integer", "null"],
                 "description": "ID aus der bereitgestellten Account-Liste oder null.",
@@ -86,17 +119,29 @@ EXTRACTION_TOOL = {
 
 
 @dataclass(frozen=True)
+class TransactionEntry:
+    date: str   # YYYY-MM-DD
+    amount: float
+    description: str
+
+
+@dataclass(frozen=True)
 class ExtractionResult:
     bank_name: str
     iban_or_account_number: str
     statement_period_start: str
     statement_period_end: str
-    transaction_count: int
+    starting_balance: float
     ending_balance: float
     currency: str
+    transactions: list[TransactionEntry]
     matched_account_id: int | None
     confidence: float
     notes: str
+
+    @property
+    def transaction_count(self) -> int:
+        return len(self.transactions)
 
 
 def _account_summary(account: Account) -> dict[str, Any]:
@@ -155,7 +200,9 @@ class PDFExtractor:
 
         response = self._client.messages.create(
             model=self._model,
-            max_tokens=2048,
+            # 8192 reicht auch für volle Tx-Liste eines Bank-Statements
+            # (typisch 30-100 Tx, ~50 Tokens pro Tx).
+            max_tokens=8192,
             system=[
                 {
                     "type": "text",
@@ -200,14 +247,27 @@ class PDFExtractor:
         if tool_payload is None:
             raise RuntimeError("Claude lieferte keinen tool_use-Block")
 
+        raw_transactions = tool_payload.get("transactions") or []
+        transactions: list[TransactionEntry] = []
+        for tx in raw_transactions:
+            try:
+                transactions.append(TransactionEntry(
+                    date=str(tx.get("date", "")),
+                    amount=float(tx.get("amount", 0.0) or 0.0),
+                    description=str(tx.get("description", ""))[:200],
+                ))
+            except (TypeError, ValueError) as exc:
+                log.warning("Skipping malformed tx in PDF %s: %s", pdf_filename, exc)
+
         return ExtractionResult(
             bank_name=str(tool_payload.get("bank_name", "")),
             iban_or_account_number=str(tool_payload.get("iban_or_account_number", "")),
             statement_period_start=str(tool_payload.get("statement_period_start", "")),
             statement_period_end=str(tool_payload.get("statement_period_end", "")),
-            transaction_count=int(tool_payload.get("transaction_count", 0) or 0),
+            starting_balance=float(tool_payload.get("starting_balance", 0.0) or 0.0),
             ending_balance=float(tool_payload.get("ending_balance", 0.0) or 0.0),
             currency=str(tool_payload.get("currency", "EUR")).upper(),
+            transactions=transactions,
             matched_account_id=(
                 int(tool_payload["matched_account_id"])
                 if tool_payload.get("matched_account_id") is not None

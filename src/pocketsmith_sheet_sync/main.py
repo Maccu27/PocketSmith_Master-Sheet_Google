@@ -75,6 +75,27 @@ def _run_backfill(year: int, verbose: bool) -> int:
     return 0
 
 
+def _run_reset_tracker(verbose: bool) -> int:
+    """Löscht alle PDF-Records aus dem Tracking-Sheet, damit alle PDFs neu prozessiert werden."""
+    from .drive_client import DriveClient
+    from .pdf_tracker import PDFTracker
+    settings = load_settings()
+    if not settings.drive_finanzen_folder_id:
+        log.error("DRIVE_FINANZEN_FOLDER_ID nicht gesetzt")
+        return 2
+    cred_info = settings.google_credentials_info()
+    sheets = SheetsClient(cred_info)
+    drive = DriveClient(cred_info)
+    tracker = PDFTracker(
+        sheets, drive,
+        finanzen_folder_id=settings.drive_finanzen_folder_id,
+        explicit_sheet_id=settings.pdf_tracking_sheet_id,
+    )
+    tracker.reset_data()
+    log.info("Tracking-Sheet zurückgesetzt. Beim nächsten parse-pdfs werden alle PDFs neu verarbeitet.")
+    return 0
+
+
 def _run_daily(verbose: bool) -> int:
     """Combine: PocketSmith → Sheets, parse new PDFs, then backfill Soll-Werte."""
     log.info("====== daily run: phase 1 = PocketSmith sync ======")
@@ -122,6 +143,11 @@ def cli() -> int:
     p_daily = sub.add_parser("daily", help="sync + parse-pdfs in einem Lauf")
     p_daily.add_argument("-v", "--verbose", action="store_true")
 
+    p_reset = sub.add_parser("reset-tracker", help="ACHTUNG: löscht alle PDF-Records im Tracker")
+    p_reset.add_argument("--confirm", action="store_true", required=True,
+                         help="Bestätigung erforderlich, sonst keine Aktion")
+    p_reset.add_argument("-v", "--verbose", action="store_true")
+
     args = parser.parse_args()
     setup_logging(getattr(args, "verbose", False))
 
@@ -135,6 +161,11 @@ def cli() -> int:
         return _run_backfill(args.year, args.verbose)
     if args.command == "daily":
         return _run_daily(args.verbose)
+    if args.command == "reset-tracker":
+        if not args.confirm:
+            log.error("--confirm fehlt. Diese Aktion löscht alle PDF-Records.")
+            return 2
+        return _run_reset_tracker(args.verbose)
     return 1
 
 

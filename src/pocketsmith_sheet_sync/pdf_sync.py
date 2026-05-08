@@ -7,6 +7,7 @@ das Jahr konfiguriert ist), trackt alles in einem separaten Tracking-Sheet.
 
 from __future__ import annotations
 
+import calendar
 import logging
 import time
 from datetime import date, datetime
@@ -15,7 +16,7 @@ from typing import Any
 from .config import Settings
 from .drive_client import DriveClient
 from .pdf_extractor import ExtractionResult, PDFExtractor
-from .pdf_tracker import PDFTracker, ParsedRecord
+from .pdf_tracker import PDFTracker, ParsedRecord, TrackedTransaction
 from .pocketsmith import Account, PocketSmithClient
 from .sheets import SheetsClient
 from .sync import KONTEN_TAB, MONAT_HEADERS, monat_tab_name
@@ -128,6 +129,22 @@ def parse_all_new_pdfs(
             continue
 
         matched = find_account_by_id(accounts, result.matched_account_id)
+        notes = result.notes or ""
+
+        # Vier-Augen-Check: starting_balance(this) ?= ending_balance(prev)
+        if matched and result.starting_balance:
+            prev = _find_previous_record(tracker, matched.id, result.statement_period_start)
+            if prev:
+                diff = round(result.starting_balance - prev.ending_balance, 2)
+                if abs(diff) > 0.01:
+                    warning = (
+                        f"⚠ Vier-Augen-Diff {diff:+.2f}: "
+                        f"starting_balance ({result.starting_balance:.2f}) "
+                        f"!= prev ending_balance ({prev.ending_balance:.2f}, {prev.path})"
+                    )
+                    notes = (notes + " | " + warning).strip(" |")
+                    log.warning("  %s", warning)
+
         record = ParsedRecord(
             file_id=pdf.id,
             path=pdf.path,
@@ -141,42 +158,103 @@ def parse_all_new_pdfs(
             month=month,
             statement_period_start=result.statement_period_start,
             statement_period_end=result.statement_period_end,
-            transaction_count=result.transaction_count,
+            starting_balance=result.starting_balance,
             ending_balance=result.ending_balance,
+            transaction_count=result.transaction_count,
             confidence=result.confidence,
-            notes=result.notes,
+            notes=notes,
+            transactions=[
+                TrackedTransaction(date=tx.date, amount=tx.amount, description=tx.description)
+                for tx in result.transactions
+            ],
         )
         tracker.append_parsed(record)
+        log.info("  → %d Transaktionen extrahiert, Saldo %s %.2f",
+                 record.transaction_count, record.currency, record.ending_balance)
 
-        # Sofort in Master-Sheet schreiben, wenn das Jahr konfiguriert ist
-        master_sheet_id = sheets_per_year.get(year)
-        if not master_sheet_id:
-            log.info("  → keine Master-Sheet für %d, nur im Tracker gespeichert", year)
-            continue
-        if not matched:
-            log.warning("  → kein Account-Match (confidence=%.2f, notes=%s)",
-                        result.confidence, result.notes)
-            continue
-
-        try:
-            written = write_soll_to_master_sheet(
-                sheets, master_sheet_id, year=year, month=month,
-                account_name=matched.name,
-                soll_count=record.transaction_count,
-                soll_balance=record.ending_balance,
-            )
-            if written:
-                counters["written_to_sheet"] += 1
-                log.info("  → Soll-Werte in %s/%s eingetragen (Konto: %s)",
-                         year, monat_tab_name(year, month), matched.name)
-            else:
-                log.warning("  → Konto %s nicht in Konten-Tab der Master-Sheet %d gefunden",
-                            matched.name, year)
-        except Exception as exc:
-            log.error("  → Sheet-Update fehlgeschlagen: %s", exc, exc_info=True)
-            counters["errors"] += 1
-
+    log.info("Phase 1 (Parse) fertig — Sheets werden in der Backfill-Phase aus dem Tracker befüllt")
     return counters
+
+
+def _find_previous_record(
+    tracker: PDFTracker,
+    account_id: int,
+    current_period_start: str,
+) -> ParsedRecord | None:
+    """Findet den jüngsten Record für ein Konto, dessen statement_period_end vor current_period_start liegt."""
+    if not current_period_start:
+        return None
+    candidates = [
+        r for r in tracker.all_parsed_records()
+        if r.matched_account_id == account_id
+        and r.statement_period_end
+        and r.statement_period_end < current_period_start
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda r: r.statement_period_end)
+
+
+def aggregate_pdf_data_for_month(
+    records: list[ParsedRecord],
+    *,
+    account_id: int,
+    year: int,
+    month: int,
+) -> tuple[int, float | None]:
+    """Aggregiere Tracker-Daten zu Soll-Werten für (year, month, account).
+
+    Liefert (soll_count, soll_balance_at_eom_or_None).
+
+    Logik:
+      - count = Anzahl Tx (aus allen relevanten Auszügen) deren tx.date
+        im Kalendermonat liegt. Damit ist es egal, ob ein Auszug 1.-31.
+        oder 5.-4. läuft.
+      - balance = aus dem Auszug der den Monatsletzten enthält:
+          ending_balance(Auszug-Stichtag) − sum(Tx nach Monatsletzten im gleichen Auszug)
+        Ist kein Auszug verfügbar, der den Monatsletzten abdeckt, → None.
+    """
+    last_day = date(year, month, calendar.monthrange(year, month)[1])
+    first_day = date(year, month, 1)
+
+    rec_for_account = [r for r in records if r.matched_account_id == account_id]
+
+    soll_count = 0
+    for r in rec_for_account:
+        for tx in r.transactions:
+            try:
+                tx_date = date.fromisoformat(tx.date)
+            except (ValueError, TypeError):
+                continue
+            if first_day <= tx_date <= last_day:
+                soll_count += 1
+
+    eom_record: ParsedRecord | None = None
+    for r in rec_for_account:
+        try:
+            period_start = date.fromisoformat(r.statement_period_start)
+            period_end = date.fromisoformat(r.statement_period_end)
+        except (ValueError, TypeError):
+            continue
+        if period_start <= last_day <= period_end:
+            eom_record = r
+            break
+
+    eom_balance: float | None
+    if eom_record is None:
+        eom_balance = None
+    else:
+        post_sum = 0.0
+        for tx in eom_record.transactions:
+            try:
+                tx_date = date.fromisoformat(tx.date)
+            except (ValueError, TypeError):
+                continue
+            if tx_date > last_day:
+                post_sum += tx.amount
+        eom_balance = round(eom_record.ending_balance - post_sum, 2)
+
+    return soll_count, eom_balance
 
 
 def backfill_master_sheet_from_tracker(
@@ -211,26 +289,47 @@ def backfill_master_sheet_from_tracker(
         tracker = _shared_tracker
 
     records = tracker.all_parsed_records()  # gecacht in tracker
-    relevant = [r for r in records if r.year == year and r.matched_account_name]
-    log.info("Backfill für %d: %d relevante Tracker-Einträge", year, len(relevant))
+
+    # Sammle alle Konten, die in diesem Kalenderjahr mindestens 1 Tx hatten.
+    # Verwende dafür die Tx-Liste aus den Tracker-Records (kalendergenau).
+    account_names: dict[int, str] = {}
+    for r in records:
+        if not r.matched_account_id or not r.matched_account_name:
+            continue
+        for tx in r.transactions:
+            try:
+                tx_date = date.fromisoformat(tx.date)
+            except (ValueError, TypeError):
+                continue
+            if tx_date.year == year:
+                account_names[r.matched_account_id] = r.matched_account_name
+                break
+
+    log.info("Backfill für %d: %d Konten haben Tracker-Daten", year, len(account_names))
 
     if _row_cache is None:
         _row_cache = {}
 
     written = 0
-    for r in relevant:
-        try:
-            ok = write_soll_to_master_sheet(
-                sheets, master_sheet_id, year=year, month=r.month,
-                account_name=r.matched_account_name,
-                soll_count=r.transaction_count,
-                soll_balance=r.ending_balance,
-                _row_cache=_row_cache,
+    for account_id, account_name in account_names.items():
+        for month in range(1, 13):
+            soll_count, soll_balance = aggregate_pdf_data_for_month(
+                records, account_id=account_id, year=year, month=month,
             )
-            if ok:
-                written += 1
-        except Exception as exc:
-            log.warning("Backfill skip für %s/%s: %s", r.path, r.matched_account_name, exc)
+            if soll_count == 0 and soll_balance is None:
+                continue
+            try:
+                ok = write_soll_to_master_sheet(
+                    sheets, master_sheet_id, year=year, month=month,
+                    account_name=account_name,
+                    soll_count=soll_count,
+                    soll_balance=soll_balance,
+                    _row_cache=_row_cache,
+                )
+                if ok:
+                    written += 1
+            except Exception as exc:
+                log.warning("Backfill skip für %s/%d-%02d: %s", account_name, year, month, exc)
     return written
 
 
@@ -284,7 +383,7 @@ def write_soll_to_master_sheet(
     month: int,
     account_name: str,
     soll_count: int,
-    soll_balance: float,
+    soll_balance: float | None,
     _row_cache: dict[tuple[str, str], dict[str, int]] | None = None,
 ) -> bool:
     """Findet die Zeile mit `account_name` im Monatstab und schreibt Soll-Werte.
@@ -324,15 +423,17 @@ def write_soll_to_master_sheet(
     if target_row is None:
         return False
 
-    # Spalte C (Soll-Anzahl) + Spalte F (Soll-Saldo) einzeln updaten.
+    # Spalte C (Soll-Anzahl) und Spalte F (Soll-Saldo) einzeln updaten,
+    # damit Formel-Spalten dazwischen unangetastet bleiben.
     sheets.write_values(
         spreadsheet_id,
         f"{tab}!{MONAT_COL_SOLL_ANZAHL_LETTER}{target_row}",
         [[soll_count]],
     )
-    sheets.write_values(
-        spreadsheet_id,
-        f"{tab}!{MONAT_COL_SOLL_SALDO_LETTER}{target_row}",
-        [[soll_balance]],
-    )
+    if soll_balance is not None:
+        sheets.write_values(
+            spreadsheet_id,
+            f"{tab}!{MONAT_COL_SOLL_SALDO_LETTER}{target_row}",
+            [[soll_balance]],
+        )
     return True

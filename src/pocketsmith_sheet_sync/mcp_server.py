@@ -73,6 +73,31 @@ def list_years() -> dict[str, Any]:
 
 
 @mcp.tool()
+def reset_pdf_tracker() -> str:
+    """Löscht alle PDF-Records aus dem Tracking-Sheet (DESTRUKTIV).
+
+    Beim nächsten parse_pdfs-Aufruf werden ALLE PDFs neu verarbeitet —
+    Anthropic-API wird neu befragt, das kostet Geld. Nur nutzen wenn
+    das Schema geändert wurde oder bestehende Daten neu extrahiert werden sollen.
+    """
+    from .drive_client import DriveClient
+    from .pdf_tracker import PDFTracker
+    settings = load_settings()
+    if not settings.drive_finanzen_folder_id:
+        return "Fehler: DRIVE_FINANZEN_FOLDER_ID nicht konfiguriert"
+    cred_info = settings.google_credentials_info()
+    sheets = SheetsClient(cred_info)
+    drive = DriveClient(cred_info)
+    tracker = PDFTracker(
+        sheets, drive,
+        finanzen_folder_id=settings.drive_finanzen_folder_id,
+        explicit_sheet_id=settings.pdf_tracking_sheet_id,
+    )
+    tracker.reset_data()
+    return "Tracking-Sheet zurückgesetzt. Beim nächsten parse_pdfs werden alle PDFs neu verarbeitet."
+
+
+@mcp.tool()
 def parse_pdfs() -> dict[str, Any]:
     """
     Triggert den PDF-Parser: scannt Drive-Ordner Finanzen/.../Kontoauszüge,
