@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +16,6 @@ class Settings(BaseSettings):
 
     google_service_account_file: str | None = Field(default=None)
     google_service_account_json: str | None = Field(default=None)
-
-    master_sheet_2026: str | None = Field(default=None)
-    master_sheet_2025: str | None = Field(default=None)
-    master_sheet_2024: str | None = Field(default=None)
 
     drive_finanzen_folder_id: str | None = Field(default=None)
     verified_label: str = Field(default="Verifiziert")
@@ -43,13 +40,33 @@ class Settings(BaseSettings):
 
     @property
     def sheets_per_year(self) -> dict[int, str]:
+        """Liest MASTER_SHEET_<YEAR> dynamisch aus os.environ + .env.
+
+        Pydantic-Settings würde nur explizit deklarierte Felder lesen — bei
+        24+ Jahren wäre das zu starr. Wir gehen direkt über die Umgebung,
+        damit beliebige Jahre konfigurierbar sind.
+        """
+        # Lade .env zur Sicherheit nochmal (für lokale Tests; auf Railway
+        # stehen die Werte direkt in os.environ).
+        env_values: dict[str, str] = {}
+        env_file = Path(self.model_config.get("env_file") or ".env")
+        if env_file.exists():
+            try:
+                from dotenv import dotenv_values
+                env_values = {k: v for k, v in dotenv_values(env_file).items() if v}
+            except Exception:
+                pass
+
         mapping: dict[int, str] = {}
         for year in self.years:
-            attr = f"master_sheet_{year}"
-            sheet_id = getattr(self, attr, None)
+            key = f"MASTER_SHEET_{year}"
+            sheet_id = os.environ.get(key) or env_values.get(key)
             if sheet_id:
                 mapping[year] = sheet_id
         return mapping
+
+    def get_master_sheet_id(self, year: int) -> str | None:
+        return self.sheets_per_year.get(year)
 
     def google_credentials_info(self) -> dict[str, Any]:
         if self.google_service_account_json:

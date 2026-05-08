@@ -76,7 +76,7 @@ def _run_backfill(year: int, verbose: bool) -> int:
 
 
 def _run_daily(verbose: bool) -> int:
-    """Combine: PocketSmith → Sheets, then Drive-PDFs → Soll-Werte."""
+    """Combine: PocketSmith → Sheets, parse new PDFs, then backfill Soll-Werte."""
     log.info("====== daily run: phase 1 = PocketSmith sync ======")
     sync_rc = _run_sync(None, verbose)
     if sync_rc != 0:
@@ -86,10 +86,27 @@ def _run_daily(verbose: bool) -> int:
     try:
         _run_parse_pdfs(verbose)
     except Exception as exc:
-        # parse-pdfs nicht kritisch — falls Anthropic-Key oder Drive-Setup fehlt,
-        # ist sync trotzdem schon erledigt.
         log.error("parse-pdfs schlug fehl: %s", exc, exc_info=True)
-        return 0  # sync ist durch, das reicht
+
+    log.info("====== daily run: phase 3 = backfill Soll-Werte ins Master-Sheets ======")
+    # Backfill für alle konfigurierten Jahre — das ist idempotent und löst das
+    # Problem, dass Tracker-Daten aus früheren Runs in neu aktivierte Jahres-
+    # Sheets noch nicht eingetragen wurden.
+    try:
+        from .pdf_sync import backfill_master_sheet_from_tracker
+        settings = load_settings()
+        cred_info = settings.google_credentials_info()
+        for year in sorted(settings.sheets_per_year.keys()):
+            try:
+                written = backfill_master_sheet_from_tracker(
+                    settings, cred_info=cred_info, year=year,
+                )
+                log.info("backfill %d: %d Soll-Werte geschrieben", year, written)
+            except Exception as exc:
+                log.error("backfill %d fehlgeschlagen: %s", year, exc)
+    except Exception as exc:
+        log.error("backfill-phase schlug fehl: %s", exc, exc_info=True)
+
     log.info("====== daily run done ======")
     return 0
 
