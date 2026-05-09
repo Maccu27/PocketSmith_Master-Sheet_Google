@@ -76,11 +76,12 @@ def parse_all_new_pdfs(
         explicit_sheet_id=settings.pdf_tracking_sheet_id,
     )
 
-    log.info("Scanning Drive folder %s for PDFs under '%s/...'",
-             settings.drive_finanzen_folder_id, settings.pdf_kontoauszug_folder_marker)
+    markers = settings.folder_markers
+    log.info("Scanning Drive folder %s for PDFs under any of %s/...",
+             settings.drive_finanzen_folder_id, markers)
     pdfs = drive.find_pdfs_under_marker(
         settings.drive_finanzen_folder_id,
-        folder_marker=settings.pdf_kontoauszug_folder_marker,
+        folder_marker=markers,
     )
     log.info("Found %d Kontoauszug-PDFs total", len(pdfs))
 
@@ -206,14 +207,13 @@ def aggregate_pdf_data_for_month(
 
     Liefert (soll_count, soll_balance_at_eom_or_None).
 
-    Logik:
-      - count = Anzahl Tx (aus allen relevanten Auszügen) deren tx.date
-        im Kalendermonat liegt. Damit ist es egal, ob ein Auszug 1.-31.
-        oder 5.-4. läuft.
-      - balance = aus dem Auszug der den Monatsletzten enthält:
-          ending_balance(Auszug-Stichtag) − sum(Tx nach Monatsletzten im gleichen Auszug)
-        Ist kein Auszug verfügbar, der den Monatsletzten abdeckt, → None.
+    PayPal-Spezialfall: wenn die Tx-Liste eines Records tx_type-Felder
+    gesetzt hat, wird die paypal_classifier-Pipeline genutzt — dann zählen
+    nur echte PayPal-Cashflow-Buchungen, Pass-Through-Käufe (per Bankkonto
+    abgebucht) werden ignoriert.
     """
+    from .paypal_classifier import classify_paypal_transactions, is_paypal_format
+
     last_day = date(year, month, calendar.monthrange(year, month)[1])
     first_day = date(year, month, 1)
 
@@ -221,7 +221,17 @@ def aggregate_pdf_data_for_month(
 
     soll_count = 0
     for r in rec_for_account:
-        for tx in r.transactions:
+        # Pro Record: ggf. PayPal-Klassifikation
+        if is_paypal_format(r.transactions):
+            classifications = classify_paypal_transactions(r.transactions)
+            relevant_txs = [
+                tx for i, tx in enumerate(r.transactions)
+                if classifications.get(i) == "cashflow"
+            ]
+        else:
+            relevant_txs = r.transactions
+
+        for tx in relevant_txs:
             try:
                 tx_date = date.fromisoformat(tx.date)
             except (ValueError, TypeError):
@@ -245,14 +255,22 @@ def aggregate_pdf_data_for_month(
         eom_balance = None
     else:
         post_sum = 0.0
-        for tx in eom_record.transactions:
-            try:
-                tx_date = date.fromisoformat(tx.date)
-            except (ValueError, TypeError):
-                continue
-            if tx_date > last_day:
-                post_sum += tx.amount
-        eom_balance = round(eom_record.ending_balance - post_sum, 2)
+        # Bei PayPal: post-Tx-Summe aus dem Auszug ergibt nicht den korrekten
+        # Saldo, weil viele Tx pass-through sind. Wir verlassen uns hier auf
+        # ending_balance vom Auszug-Stichtag selbst — bei PayPal-Auszügen ist
+        # der oft nicht gegeben (PDF zeigt keinen Saldo). Fallback: leer.
+        if is_paypal_format(eom_record.transactions):
+            # PayPal-PDF kennt keinen Saldo zuverlässig; auf None setzen
+            eom_balance = None if eom_record.ending_balance == 0.0 else round(eom_record.ending_balance, 2)
+        else:
+            for tx in eom_record.transactions:
+                try:
+                    tx_date = date.fromisoformat(tx.date)
+                except (ValueError, TypeError):
+                    continue
+                if tx_date > last_day:
+                    post_sum += tx.amount
+            eom_balance = round(eom_record.ending_balance - post_sum, 2)
 
     return soll_count, eom_balance
 

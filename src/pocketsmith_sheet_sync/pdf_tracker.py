@@ -50,6 +50,8 @@ class TrackedTransaction:
     date: str
     amount: float
     description: str
+    tx_type: str = ""
+    status: str = ""
 
 
 @dataclass(frozen=True)
@@ -76,8 +78,16 @@ class ParsedRecord:
     def as_row(self) -> list[Any]:
         import json as _json
         tx_payload = _json.dumps(
-            [{"date": t.date, "amount": t.amount, "description": t.description}
-             for t in self.transactions],
+            [
+                {
+                    "date": t.date,
+                    "amount": t.amount,
+                    "description": t.description,
+                    "tx_type": t.tx_type,
+                    "status": t.status,
+                }
+                for t in self.transactions
+            ],
             ensure_ascii=False,
         )
         return [
@@ -243,6 +253,8 @@ class PDFTracker:
                                 date=str(raw.get("date", "")),
                                 amount=float(raw.get("amount", 0.0) or 0.0),
                                 description=str(raw.get("description", "")),
+                                tx_type=str(raw.get("tx_type", "")),
+                                status=str(raw.get("status", "")),
                             ))
                     except (ValueError, TypeError) as parse_exc:
                         log.warning("transactions_json malformed for %s: %s", row[0], parse_exc)

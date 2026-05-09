@@ -25,7 +25,14 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(default=None)
     anthropic_model: str = Field(default="claude-sonnet-4-6")
     pdf_tracking_sheet_id: str | None = Field(default=None)
-    pdf_kontoauszug_folder_marker: str = Field(default="Kontoauszüge")
+    # Komma-getrennte Liste von Ordnernamen (NFC-normalisiert) unter denen
+    # PDFs gefunden werden. Beispiele: "Kontoauszüge", "Jahresauszüge",
+    # "Transaktionsauszüge". Default deckt DKB + PayPal-Jahresauszüge ab.
+    pdf_kontoauszug_folder_marker: str = Field(default="Kontoauszüge,Jahresauszüge")
+
+    @property
+    def folder_markers(self) -> list[str]:
+        return [m.strip() for m in self.pdf_kontoauszug_folder_marker.split(",") if m.strip()]
 
     @field_validator("sync_years")
     @classmethod

@@ -42,16 +42,26 @@ class DriveClient:
         self,
         root_folder_id: str,
         *,
-        folder_marker: str = "Kontoauszüge",
+        folder_marker: str | list[str] = "Kontoauszüge",
     ) -> list[DriveFile]:
-        """Rekursive Suche: alle PDFs, deren Pfad einen Ordner mit `folder_marker` enthält."""
-        marker_nfc = unicodedata.normalize("NFC", folder_marker)
+        """Rekursive Suche: alle PDFs, deren Pfad einen der `folder_marker` enthält.
+
+        Akzeptiert einen einzelnen String oder eine Liste — z. B.
+        ["Kontoauszüge", "Jahresauszüge"] um DKB + PayPal-Jahresauszüge in
+        einem Lauf zu bekommen.
+        """
+        markers = [folder_marker] if isinstance(folder_marker, str) else list(folder_marker)
+        markers_nfc = [unicodedata.normalize("NFC", m) for m in markers]
         results: list[DriveFile] = []
+        seen_ids: set[str] = set()
         for f in self._walk(root_folder_id, ""):
             if not f.name.lower().endswith(".pdf"):
                 continue
-            if marker_nfc not in f.parent_path:
+            if not any(m in f.parent_path for m in markers_nfc):
                 continue
+            if f.id in seen_ids:
+                continue
+            seen_ids.add(f.id)
             results.append(f)
         return results
 

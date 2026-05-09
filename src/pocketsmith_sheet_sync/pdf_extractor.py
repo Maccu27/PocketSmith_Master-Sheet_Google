@@ -96,6 +96,29 @@ EXTRACTION_TOOL = {
                             "type": "string",
                             "description": "Verwendungszweck/Empfänger – kompakt, max ~100 Zeichen.",
                         },
+                        "tx_type": {
+                            "type": "string",
+                            "description": (
+                                "Bei PayPal-Auszügen: der technische Buchungstyp aus der "
+                                "'Description'-Spalte VOR dem Doppelpunkt. Beispiele: "
+                                "'Express Checkout Payment', 'PreApproved Payment Bill User Payment', "
+                                "'General Card Deposit', 'PayPal Buyer Credit Payment Funding', "
+                                "'Bank Deposit to PP Account', 'Mobile Payment', "
+                                "'User Initiated Withdrawal', 'General Card Withdrawal', "
+                                "'Payment Refund', 'General Buyer Credit Payment', "
+                                "'General Currency Conversion', 'Void of Authorization', "
+                                "'General Authorization', 'General Payment'. "
+                                "Bei normalen Bankauszügen leer lassen."
+                            ),
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": (
+                                "Bei PayPal-Auszügen: Status aus der 'Status'-Spalte "
+                                "('Completed', 'Pending', 'Reversed', 'Denied'). Bei normalen "
+                                "Bankauszügen leer lassen."
+                            ),
+                        },
                     },
                 },
             },
@@ -123,6 +146,8 @@ class TransactionEntry:
     date: str   # YYYY-MM-DD
     amount: float
     description: str
+    tx_type: str = ""   # nur bei PayPal-Auszügen gefüllt
+    status: str = ""    # nur bei PayPal-Auszügen gefüllt
 
 
 @dataclass(frozen=True)
@@ -255,6 +280,8 @@ class PDFExtractor:
                     date=str(tx.get("date", "")),
                     amount=float(tx.get("amount", 0.0) or 0.0),
                     description=str(tx.get("description", ""))[:200],
+                    tx_type=str(tx.get("tx_type", ""))[:80],
+                    status=str(tx.get("status", ""))[:30],
                 ))
             except (TypeError, ValueError) as exc:
                 log.warning("Skipping malformed tx in PDF %s: %s", pdf_filename, exc)
