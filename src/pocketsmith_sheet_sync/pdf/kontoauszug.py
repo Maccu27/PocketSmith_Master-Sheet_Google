@@ -1,25 +1,23 @@
-"""PDF → strukturierte Bank-Auszug-Daten via Anthropic Claude.
+"""Kontoauszug-Extraktor.
 
-Schickt eine PDF + die Liste bekannter PocketSmith transaction_accounts an Claude.
-Claude antwortet mit Tool-Use (strukturiertes JSON) — Konto-Match, Periode,
-Anzahl Transaktionen und Endsaldo.
+Vorher: pdf_extractor.py (Top-Level-Modul).
+Jetzt: pdf/kontoauszug.py, nutzt PDFClient als Common-Layer.
+
+Funktional unverändert. Nur die Anthropic-Mechanik (Client-Setup,
+Base64, Message-Aufbau, Tool-Use-Parsing) liegt jetzt in PDFClient.
 """
 
 from __future__ import annotations
 
-import base64
 import logging
 from dataclasses import dataclass
 from typing import Any
 
-import anthropic
-
-from .pocketsmith import Account
+from ..pocketsmith import Account
+from .client import DEFAULT_MODEL, PDFClient
 
 log = logging.getLogger(__name__)
 
-# Sonnet 4.6 ist günstig, schnell genug, und gut bei Tabellen.
-DEFAULT_MODEL = "claude-sonnet-4-6"
 
 EXTRACTION_TOOL = {
     "name": "extract_bank_statement",
@@ -143,11 +141,11 @@ EXTRACTION_TOOL = {
 
 @dataclass(frozen=True)
 class TransactionEntry:
-    date: str   # YYYY-MM-DD
+    date: str  # YYYY-MM-DD
     amount: float
     description: str
-    tx_type: str = ""   # nur bei PayPal-Auszügen gefüllt
-    status: str = ""    # nur bei PayPal-Auszügen gefüllt
+    tx_type: str = ""  # nur bei PayPal-Auszügen gefüllt
+    status: str = ""  # nur bei PayPal-Auszügen gefüllt
 
 
 @dataclass(frozen=True)
@@ -171,7 +169,6 @@ class ExtractionResult:
 
 def _account_summary(account: Account) -> dict[str, Any]:
     """Kompakte Repräsentation für den LLM-Prompt."""
-    # Versuche IBAN aus Namen zu extrahieren (oft als Suffix " - DE12...")
     iban = ""
     if " - " in account.name:
         possible = account.name.rsplit(" - ", 1)[1].strip()
@@ -187,13 +184,15 @@ def _account_summary(account: Account) -> dict[str, Any]:
     }
 
 
-class PDFExtractor:
+class KontoauszugExtractor:
+    """Extrahiert Bank-Auszüge aus PDF und matched sie auf PocketSmith-Konten.
+
+    Vorher hieß diese Klasse PDFExtractor. Der alte Name ist als Alias
+    im Subpackage-`__init__.py` weiterhin verfügbar.
+    """
+
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL):
-        # 8 Retries mit exponential backoff (Default ist 2) — bei Rate-Limit
-        # gibt Anthropic in den Headers retry_after zurück, der SDK-Client
-        # respektiert das automatisch.
-        self._client = anthropic.Anthropic(api_key=api_key, max_retries=8)
-        self._model = model
+        self._client = PDFClient(api_key=api_key, model=model)
 
     def extract(
         self,
@@ -204,12 +203,11 @@ class PDFExtractor:
     ) -> ExtractionResult:
         """Verarbeitet eine PDF und liefert strukturiertes Ergebnis."""
         account_list = [_account_summary(a) for a in accounts]
-        b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
 
         # System-Prompt enthält die ~93 Konten und ist für jeden Sync-Lauf
         # identisch → mit cache_control wird er nach dem 1. Call zu 0,1×
         # Token-Kosten und zählt entsprechend gegen das Rate Limit.
-        system_prompt_text = (
+        system_prompt = (
             "Du bist ein Bank-Statement-Extractor. Lies den deutschen Bankauszug und "
             "extrahiere die geforderten Felder genau. Zähle Buchungen (Transaktionen) — "
             "sowohl Soll als auch Haben — als einzelne Positionen. Endsaldo ist der "
@@ -223,66 +221,32 @@ class PDFExtractor:
             )
         )
 
-        response = self._client.messages.create(
-            model=self._model,
-            # 8192 reicht auch für volle Tx-Liste eines Bank-Statements
-            # (typisch 30-100 Tx, ~50 Tokens pro Tx).
+        tool_payload = self._client.call_with_tool(
+            pdf_bytes,
+            pdf_filename=pdf_filename,
+            tool=EXTRACTION_TOOL,
+            system_prompt=system_prompt,
+            user_instruction=(
+                f"Datei: {pdf_filename}\n\n"
+                "Extrahiere alle geforderten Felder mit dem extract_bank_statement Tool."
+            ),
             max_tokens=8192,
-            system=[
-                {
-                    "type": "text",
-                    "text": system_prompt_text,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            tools=[EXTRACTION_TOOL],
-            tool_choice={"type": "tool", "name": EXTRACTION_TOOL["name"]},
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": b64,
-                            },
-                            "title": pdf_filename,
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Datei: {pdf_filename}\n\n"
-                                "Extrahiere alle geforderten Felder mit dem extract_bank_statement Tool."
-                            ),
-                        },
-                    ],
-                }
-            ],
+            cache_system_prompt=True,
         )
-
-        # Find tool_use block in response
-        tool_payload: dict[str, Any] | None = None
-        for block in response.content:
-            if block.type == "tool_use" and block.name == EXTRACTION_TOOL["name"]:
-                tool_payload = block.input  # type: ignore[assignment]
-                break
-
-        if tool_payload is None:
-            raise RuntimeError("Claude lieferte keinen tool_use-Block")
 
         raw_transactions = tool_payload.get("transactions") or []
         transactions: list[TransactionEntry] = []
         for tx in raw_transactions:
             try:
-                transactions.append(TransactionEntry(
-                    date=str(tx.get("date", "")),
-                    amount=float(tx.get("amount", 0.0) or 0.0),
-                    description=str(tx.get("description", ""))[:200],
-                    tx_type=str(tx.get("tx_type", ""))[:80],
-                    status=str(tx.get("status", ""))[:30],
-                ))
+                transactions.append(
+                    TransactionEntry(
+                        date=str(tx.get("date", "")),
+                        amount=float(tx.get("amount", 0.0) or 0.0),
+                        description=str(tx.get("description", ""))[:200],
+                        tx_type=str(tx.get("tx_type", ""))[:80],
+                        status=str(tx.get("status", ""))[:30],
+                    )
+                )
             except (TypeError, ValueError) as exc:
                 log.warning("Skipping malformed tx in PDF %s: %s", pdf_filename, exc)
 

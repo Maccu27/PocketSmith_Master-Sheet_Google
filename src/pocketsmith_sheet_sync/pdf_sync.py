@@ -15,7 +15,7 @@ from typing import Any
 
 from .config import Settings
 from .drive_client import DriveClient
-from .pdf_extractor import ExtractionResult, PDFExtractor
+from .pdf import ExtractionResult, PDFExtractor
 from .pdf_tracker import PDFTracker, ParsedRecord, TrackedTransaction
 from .pocketsmith import Account, PocketSmithClient
 from .sheets import SheetsClient

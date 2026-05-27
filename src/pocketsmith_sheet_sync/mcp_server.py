@@ -128,6 +128,67 @@ def backfill_year(year: int) -> dict[str, Any]:
 
 
 @mcp.tool()
+def get_completeness_check(account_name: str, year: int, month: int) -> dict[str, Any]:
+    """
+    Vollständigkeits-Check für ein Konto + Monat.
+
+    Vergleicht Anzahl + End-Saldo der PocketSmith-Buchungen gegen die
+    aus den geparsten PDF-Kontoauszügen abgeleiteten Soll-Werte.
+
+    Verwendet vom finance-agent-system (Variante A für Master-Sheet-Integration).
+
+    Args:
+        account_name: Substring des Konto-Namens (z.B. "DKB Girokonto")
+        year: 2026
+        month: 1-12
+
+    Returns:
+        dict mit account_name, year, month, anzahl_bank, anzahl_ps,
+        saldo_bank, saldo_ps, status (ok|warn|not_available), notes[].
+    """
+    from .completeness import get_completeness_check as _impl
+    return _impl(account_name, year, month).to_dict()
+
+
+@mcp.tool()
+def get_transaction_match(account_name: str, ps_transaction_id: int) -> dict[str, Any]:
+    """
+    Prüft ob eine PocketSmith-Buchung im PDF-Kontoauszug-Parser eine
+    korrespondierende Bank-Buchung hat.
+
+    Konservative MVP-Implementation: matched=True wenn für das Konto+Monat
+    der PS-Tx mindestens ein ParsedRecord im Tracker existiert.
+
+    Args:
+        account_name: Substring des Konto-Namens
+        ps_transaction_id: PocketSmith-Transaction-ID
+
+    Returns:
+        dict mit matched, auszug_betrag, auszug_memo, auszug_datum, notes[].
+    """
+    from .completeness import get_transaction_match as _impl
+    return _impl(account_name, ps_transaction_id)
+
+
+@mcp.tool()
+def trigger_refresh(account_name: str | None = None) -> dict[str, Any]:
+    """
+    Triggert manuell einen Master-Sheet-Refresh (das ganze aktuelle Jahr).
+
+    Identisch zu sync_year(current_year), aber als Methode für finance-agent-system.
+    Account-Filter wird aktuell ignoriert.
+
+    Args:
+        account_name: optional, wird aktuell ignoriert.
+
+    Returns:
+        dict mit status (started|error), message, year.
+    """
+    from .completeness import trigger_refresh as _impl
+    return _impl(account_name)
+
+
+@mcp.tool()
 def health_check() -> dict[str, Any]:
     """
     Prüft, ob das Setup funktional ist:

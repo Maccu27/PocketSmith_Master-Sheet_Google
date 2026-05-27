@@ -15,10 +15,12 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.2.0"]
+http = ["fastapi>=0.115.0", "uvicorn[standard]>=0.30.0"]
 
 [project.scripts]
 pocketsmith-sync = "pocketsmith_sheet_sync.main:cli"
 pocketsmith-sync-mcp = "pocketsmith_sheet_sync.mcp_server:main"
+pocketsmith-sync-http = "pocketsmith_sheet_sync.http_api:main"
 
 [build-system]
 requires = ["hatchling"]

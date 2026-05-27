@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from .drive_client import DriveClient, SPREADSHEET_MIME
-from .pdf_extractor import ExtractionResult
+from .pdf import ExtractionResult
 from .sheets import SheetsClient
 
 log = logging.getLogger(__name__)
