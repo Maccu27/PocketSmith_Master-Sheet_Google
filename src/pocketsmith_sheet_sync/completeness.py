@@ -286,6 +286,81 @@ def get_transaction_match(
     return result
 
 
+def list_records_for_month(
+    account_name: str,
+    year: int,
+    month: int,
+    *,
+    settings: Optional[Settings] = None,
+) -> list[dict[str, Any]]:
+    """Liste aller ParsedRecord-Daten für ein Konto+Monat.
+
+    Wird vom finance-agent-Dashboard aufgerufen, um beim Aufklappen des
+    Vollständigkeits-Check-Blocks die Detail-Liste der verarbeiteten PDFs
+    zu zeigen — inklusive Drive-Datei-ID für direkten Link.
+
+    Returns:
+        Liste von Dicts mit file_id, path, parsed_at, bank_name,
+        statement_period_start/end, transaction_count, starting/ending_balance,
+        notes, confidence. Leere Liste wenn nichts gefunden.
+    """
+    if settings is None:
+        settings = load_settings()
+
+    try:
+        cred_info = settings.google_credentials_info()
+        sheets = SheetsClient(cred_info)
+        if not settings.drive_finanzen_folder_id:
+            return []
+        from .drive_client import DriveClient
+        drive = DriveClient(cred_info)
+        tracker = PDFTracker(
+            sheets, drive,
+            finanzen_folder_id=settings.drive_finanzen_folder_id,
+            explicit_sheet_id=settings.pdf_tracking_sheet_id,
+        )
+        records = tracker.all_parsed_records()
+    except Exception as exc:
+        log.exception("Fehler beim Laden von Tracker-Records")
+        return []
+
+    # Account-ID resolvieren
+    try:
+        with PocketSmithClient(settings.pocketsmith_api_key) as ps:
+            accounts = ps.list_accounts()
+            account = _find_account_by_name(accounts, account_name)
+            if not account:
+                return []
+    except Exception:
+        return []
+
+    # Filter: nur Records für dieses Konto + Monat (Stichtag)
+    matched = [
+        r for r in records
+        if r.matched_account_id == account.id
+        and r.year == year
+        and r.month == month
+    ]
+
+    return [
+        {
+            "file_id": r.file_id,
+            "path": r.path,
+            "parsed_at": r.parsed_at,
+            "bank_name": r.bank_name,
+            "statement_period_start": r.statement_period_start,
+            "statement_period_end": r.statement_period_end,
+            "starting_balance": r.starting_balance,
+            "ending_balance": r.ending_balance,
+            "transaction_count": r.transaction_count,
+            "confidence": r.confidence,
+            "notes": r.notes,
+            "drive_url": f"https://drive.google.com/file/d/{r.file_id}/view",
+        }
+        for r in matched
+    ]
+
+
 def trigger_refresh(account_name: Optional[str] = None) -> dict[str, Any]:
     """Triggert manuell einen Master-Sheet-Refresh.
 
