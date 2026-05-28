@@ -1,13 +1,42 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+import time
+from typing import Any, Callable, TypeVar
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 log = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+def _retry_on_rate_limit(fn: Callable[[], T], *, max_retries: int = 5, base_delay: float = 2.0) -> T:
+    """Wrapper für Sheets-API-Calls mit exponential backoff bei HTTP 429.
+
+    Google Sheets erlaubt nur 60 writes/min/user. Bei Bulk-Operationen (z.B.
+    Multi-Year-Sync) wird das Limit gerne überschritten. Statt sofortigem
+    Crash retryen wir 5× mit wachsendem Sleep (2s, 4s, 8s, 16s, 32s).
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except HttpError as exc:
+            if exc.resp.status != 429:
+                raise
+            last_exc = exc
+            wait = base_delay * (2 ** attempt)
+            log.warning(
+                "Sheets-API HTTP 429 (rate limit) — retry %d/%d in %.0fs",
+                attempt + 1, max_retries, wait,
+            )
+            time.sleep(wait)
+    # Alle Retries verbraucht → letzten Fehler propagieren
+    assert last_exc is not None
+    raise last_exc
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -111,23 +140,27 @@ class SheetsClient:
         value_input_option: str = "USER_ENTERED",
     ) -> None:
         body = {"values": values}
-        self._sheets.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=range_a1,
-            valueInputOption=value_input_option,
-            body=body,
-        ).execute()
+        _retry_on_rate_limit(
+            lambda: self._sheets.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=range_a1,
+                valueInputOption=value_input_option,
+                body=body,
+            ).execute()
+        )
 
     def clear_range(self, spreadsheet_id: str, range_a1: str) -> None:
-        self._sheets.spreadsheets().values().clear(
-            spreadsheetId=spreadsheet_id, range=range_a1, body={}
-        ).execute()
+        _retry_on_rate_limit(
+            lambda: self._sheets.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id, range=range_a1, body={}
+            ).execute()
+        )
 
     def batch_update(self, spreadsheet_id: str, requests: list[dict[str, Any]]) -> dict[str, Any]:
         if not requests:
             return {"replies": []}
-        return (
-            self._sheets.spreadsheets()
+        return _retry_on_rate_limit(
+            lambda: self._sheets.spreadsheets()
             .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
             .execute()
         )
