@@ -23,6 +23,7 @@ def setup_logging(verbose: bool) -> None:
 
 
 def _run_sync(years: list[int] | None, verbose: bool) -> int:
+    import time
     settings = load_settings()
     if years is None:
         years = settings.years
@@ -36,8 +37,13 @@ def _run_sync(years: list[int] | None, verbose: bool) -> int:
     cred_info = settings.google_credentials_info()
     gs = SheetsClient(cred_info)
 
+    # Rate-Limit-Schutz: Google Sheets API erlaubt 60 writes/min/user.
+    # sync_year schreibt ~15 Tabs pro Jahr. Bei mehreren Jahren in einem Lauf
+    # 60s Sleep zwischen Jahren — verhindert HTTP 429 bei historischen Bulk-Syncs.
+    SLEEP_BETWEEN_YEARS_SEC = 60
+
     with PocketSmithClient(settings.pocketsmith_api_key) as ps:
-        for year in years:
+        for i, year in enumerate(years):
             sheet_id = sheets_per_year.get(year)
             if not sheet_id:
                 log.warning("year %d has no MASTER_SHEET_%d configured, skipping", year, year)
@@ -51,6 +57,9 @@ def _run_sync(years: list[int] | None, verbose: bool) -> int:
                 today=today,
                 verified_label=settings.verified_label,
             )
+            if i < len(years) - 1:
+                log.info("Sleep %ds vor nächstem Jahr (Sheets-API Rate-Limit-Schutz)", SLEEP_BETWEEN_YEARS_SEC)
+                time.sleep(SLEEP_BETWEEN_YEARS_SEC)
 
     log.info("sync done")
     return 0
