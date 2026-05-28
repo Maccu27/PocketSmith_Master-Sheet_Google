@@ -66,11 +66,19 @@ class PocketSmithClient:
         self.close()
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        for attempt in range(4):
+        # 8 Versuche mit Exp-Backoff (max 60s pro Versuch) + Retry-After-Header-
+        # Beachtung. PocketSmith-API drosselt aggressiv bei Multi-Year-Bulk-
+        # Syncs (98 Konten × viele Pages). Vorher: 4 Versuche × max 8s reichten
+        # bei länger andauernden Rate-Limits nicht.
+        for attempt in range(8):
             response = self._client.request(method, path, **kwargs)
             if response.status_code == 429:
-                wait = float(response.headers.get("Retry-After", 2 ** attempt))
-                log.warning("rate-limited, sleeping %.1fs", wait)
+                header_wait = response.headers.get("Retry-After")
+                if header_wait:
+                    wait = float(header_wait)
+                else:
+                    wait = min(60.0, 2.0 * (2 ** attempt))  # 2, 4, 8, 16, 32, 60, 60, 60
+                log.warning("rate-limited, sleeping %.1fs (attempt %d/8)", wait, attempt + 1)
                 time.sleep(wait)
                 continue
             response.raise_for_status()
