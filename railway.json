@@ -5,8 +5,7 @@
   },
   "deploy": {
     "startCommand": "PYTHONPATH=/app/src python -m pocketsmith_sheet_sync.main ${PSSS_MODE:-daily}",
-    "restartPolicyType": "NEVER",
-    "cronSchedule": "0 3 * * *"
+    "restartPolicyType": "NEVER"
   }
 }
 
