@@ -4,8 +4,9 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "PYTHONPATH=/app/src python -m pocketsmith_sheet_sync.main daily",
+    "startCommand": "PYTHONPATH=/app/src python -m pocketsmith_sheet_sync.main ${PSSS_MODE:-daily}",
     "restartPolicyType": "NEVER"
   }
 }
+
 

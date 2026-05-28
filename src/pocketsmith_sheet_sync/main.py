@@ -125,6 +125,34 @@ def _run_daily(verbose: bool) -> int:
     return 0
 
 
+def _run_parse_and_backfill(verbose: bool) -> int:
+    """Wie daily, aber ohne Phase 1 (PocketSmith → Sheets).
+
+    Sinnvoll bei großem Backfill über viele Jahre, wenn Phase 1 ins
+    Google-Sheets-API-Rate-Limit (60 writes/min) läuft. PS-Sync ist
+    für Backfill nicht zwingend nötig, weil Master-Sheets für ältere
+    Jahre vermutlich eh statisch sind.
+    """
+    log.info("====== parse-and-backfill: phase 2 = PDF parser ======")
+    try:
+        _run_parse_pdfs(verbose)
+    except Exception as exc:
+        log.error("parse-pdfs schlug fehl: %s", exc, exc_info=True)
+
+    log.info("====== parse-and-backfill: phase 3 = backfill Soll-Werte ======")
+    try:
+        from .pdf_sync import backfill_all_configured_years
+        settings = load_settings()
+        cred_info = settings.google_credentials_info()
+        results = backfill_all_configured_years(settings, cred_info=cred_info)
+        log.info("backfill-summary: %s", results)
+    except Exception as exc:
+        log.error("backfill-phase schlug fehl: %s", exc, exc_info=True)
+
+    log.info("====== parse-and-backfill done ======")
+    return 0
+
+
 def cli() -> int:
     parser = argparse.ArgumentParser(prog="pocketsmith-sync")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -140,8 +168,11 @@ def cli() -> int:
     p_bf.add_argument("--year", type=int, required=True)
     p_bf.add_argument("-v", "--verbose", action="store_true")
 
-    p_daily = sub.add_parser("daily", help="sync + parse-pdfs in einem Lauf")
+    p_daily = sub.add_parser("daily", help="sync + parse-pdfs + backfill in einem Lauf")
     p_daily.add_argument("-v", "--verbose", action="store_true")
+
+    p_pab = sub.add_parser("parse-and-backfill", help="parse-pdfs + backfill (ohne PS-Sync) — für große Backfill-Runs")
+    p_pab.add_argument("-v", "--verbose", action="store_true")
 
     p_reset = sub.add_parser("reset-tracker", help="ACHTUNG: löscht alle PDF-Records im Tracker")
     p_reset.add_argument("--confirm", action="store_true", required=True,
@@ -161,6 +192,8 @@ def cli() -> int:
         return _run_backfill(args.year, args.verbose)
     if args.command == "daily":
         return _run_daily(args.verbose)
+    if args.command == "parse-and-backfill":
+        return _run_parse_and_backfill(args.verbose)
     if args.command == "reset-tracker":
         if not args.confirm:
             log.error("--confirm fehlt. Diese Aktion löscht alle PDF-Records.")
