@@ -47,17 +47,17 @@ KONTEN_COL_AUSZUGSQUELLE = 6  # G
 KONTEN_AUSZUGSQUELLEN = ["Manuell", "PDF-Auto", "Keine"]
 
 MONAT_HEADERS = [
-    "Kontoname",                      # A  0  auto
-    "Anzahl PocketSmith",             # B  1  auto, nach Split-Gruppierung
-    "Soll-Anzahl",                    # C  2  manuell
-    "Differenz Anzahl",               # D  3  formel: C - B
-    "Saldo Monatsende",               # E  4  auto (laufender Monat: heutiger Stand)
-    "Soll-Saldo",                     # F  5  manuell
-    "Differenz Saldo",                # G  6  formel: F - E
-    "Verifiziert",                    # H  7  auto: Gruppen, in denen ALLE Splits verifiziert sind
-    "Verifiziert Prozent",            # I  8  formel: H / B
-    "Gebucht",                        # J  9  manuell, checkbox
-    "Notizen",                        # K 10  manuell
+    "Kontoname",                              # A  0  auto
+    "Anzahl (PocketSmith)",                   # B  1  auto, nach Split-Gruppierung
+    "Soll-Anzahl (Kontoauszug)",              # C  2  per Bank-PDF-Parse befüllt
+    "Differenz Anzahl",                       # D  3  formel: C - B
+    "Saldo-Monatsende (PocketSmith)",         # E  4  auto (laufender Monat: heutiger Stand)
+    "Saldo-Monatsende (Kontoauszug)",         # F  5  per Bank-PDF-Parse befüllt
+    "Differenz Saldo-Monatsende",             # G  6  formel: F - E
+    "Verifiziert",                            # H  7  auto: Gruppen, in denen ALLE Splits verifiziert sind
+    "Verifiziert in Prozent",                 # I  8  formel: H / B
+    "Gebucht",                                # J  9  manuell, checkbox
+    "Notizen",                                # K 10  manuell
 ]
 MONAT_COL_SOLL_ANZAHL = 2   # C
 MONAT_COL_SOLL_SALDO = 5    # F
@@ -97,7 +97,11 @@ def sync_year(
     log.info("aggregating transactions for %d", year)
     stats_by_account: dict[int, AccountYearStats] = {}
     start = date(year, 1, 1)
-    end = min(date(year, 12, 31), today)
+    # aggregator nutzt current_balance - sum(future_tx) für End-of-Month-Saldos.
+    # Für historische Jahre brauchen wir ALLE Tx von Y bis heute, sonst stimmt
+    # die Rückwärts-Berechnung nicht (Bug: Januar 2003 hätte sonst current_balance
+    # statt 0, wenn Konto erst im Mai 2003 erste Tx hatte).
+    end = today
     for acc in accounts:
         txs = list(ps.iter_transactions(acc.id, start_date=start, end_date=end))
         stats_by_account[acc.id] = aggregate_year(
@@ -484,8 +488,18 @@ def write_monat_tab(
     for s in active_stats:
         ms = s.months[month]
         prev = existing.get(s.account.name, {})
-        soll_count = prev.get("Soll-Anzahl") or ""
-        soll_balance = prev.get("Soll-Saldo") or ""
+        # Lookup tolerant: neue UND alte Header-Namen akzeptieren (Migration).
+        # Default 0 statt leer — der Agent soll IMMER eine Zahl reinschreiben.
+        soll_count_raw = (
+            prev.get("Soll-Anzahl (Kontoauszug)")
+            or prev.get("Soll-Anzahl")
+        )
+        soll_count = soll_count_raw if soll_count_raw not in (None, "") else 0
+        soll_balance_raw = (
+            prev.get("Saldo-Monatsende (Kontoauszug)")
+            or prev.get("Soll-Saldo")
+        )
+        soll_balance = soll_balance_raw if soll_balance_raw not in (None, "") else 0
         gebucht_prev = prev.get("Gebucht", "")
         if isinstance(gebucht_prev, bool):
             gebucht_value: bool = gebucht_prev
@@ -495,14 +509,14 @@ def write_monat_tab(
 
         rows.append([
             s.account.name,                                              # A
-            ms.count_effective,                                          # B  Anzahl PocketSmith (netto)
-            soll_count,                                                  # C  Soll-Anzahl
+            ms.count_effective,                                          # B  Anzahl (PocketSmith)
+            soll_count,                                                  # C  Soll-Anzahl (Kontoauszug)
             "",                                                          # D  Differenz Anzahl (Formel)
-            ms.end_of_month_balance if ms.end_of_month_balance is not None else "",  # E
-            soll_balance,                                                # F  Soll-Saldo
-            "",                                                          # G  Differenz Saldo (Formel)
+            ms.end_of_month_balance if ms.end_of_month_balance is not None else 0,   # E  Saldo-Monatsende (PocketSmith)
+            soll_balance,                                                # F  Saldo-Monatsende (Kontoauszug)
+            "",                                                          # G  Differenz Saldo-Monatsende (Formel)
             ms.count_verified_effective,                                 # H  Verifiziert
-            "",                                                          # I  Verifiziert Prozent (Formel)
+            "",                                                          # I  Verifiziert in Prozent (Formel)
             gebucht_value,                                               # J  Gebucht
             notizen,                                                     # K  Notizen
         ])
